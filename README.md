@@ -23,7 +23,7 @@ This project **does not include ad-bypass logic**. If you want ad-free playback 
 
 1. Open [MusicTube.xcodeproj](/Users/majdinagi/Documents/musicapp/MusicTube.xcodeproj).
 2. Select your Apple development team in Signing & Capabilities if you want to run on a physical device.
-3. In Google Cloud Console, create OAuth credentials for iOS/web as needed and update:
+3. In Google Cloud Console, create OAuth credentials for iOS and update:
    - `MusicTube/Resources/Secrets.local.xcconfig`
 4. Confirm the redirect URI in Google Cloud matches:
    - `com.codex.musictube:/oauth2redirect`
@@ -42,12 +42,13 @@ Before testing sign-in:
 
 1. Create or open a Google Cloud project for this app.
 2. Configure the OAuth consent screen.
-3. Create a real OAuth client whose bundle identifier matches the app's bundle ID.
+3. Create a real iOS OAuth client whose bundle identifier matches the app's bundle ID.
 4. Leave `MusicTube/Resources/Secrets.xcconfig` as the checked-in template.
 5. Copy your real values into `MusicTube/Resources/Secrets.local.xcconfig`.
 6. Set `YOUTUBE_URL_SCHEME` to the iOS URL scheme shown for that client in Google Cloud.
 7. Make sure the redirect URI used by the app matches the one configured for that client.
 8. Rebuild after changing `Secrets.local.xcconfig` so the new values land in the app bundle.
+9. Do not ship a Google OAuth client secret inside the app bundle. This project uses PKCE for the native iPhone flow.
 
 ## CarPlay entitlement note
 
@@ -61,11 +62,15 @@ After Apple approves the CarPlay audio entitlement for your App ID, add this key
 
 - Build and run on an iPhone simulator/device.
 - CarPlay UI can be tested using the iOS Simulator's CarPlay external display mode.
+- Production site: [index.html](/Users/majdinagi/Documents/musicapp/index.html)
 - Privacy policy: [PRIVACY_POLICY.html](/Users/majdinagi/Documents/musicapp/PRIVACY_POLICY.html)
+- Terms of service: [TERMS.html](/Users/majdinagi/Documents/musicapp/TERMS.html)
+- Support page: [SUPPORT.html](/Users/majdinagi/Documents/musicapp/SUPPORT.html)
 
 ## Next recommended production steps
 
+- Verify the GitHub Pages domain in Google Search Console and add `tools-source.github.io` as an authorized domain in Google Auth Platform.
+- Publish branding after the homepage, privacy policy, and terms links are live.
 - Move token exchange to your backend and store refresh tokens server-side.
-- Replace `MockLibraryService` with your licensed catalog source.
 - Add offline downloads and queue persistence.
 - Add voice intents for Siri + steering wheel controls.

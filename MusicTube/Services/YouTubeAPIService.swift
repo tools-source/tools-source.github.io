@@ -539,30 +539,6 @@ final class YouTubeAPIService: MusicCatalogProviding {
     }
 }
 
-enum MockLibraryService {
-    static let featured: [Track] = [
-        Track(title: "Synth Nights", artist: "Nova Echo", artworkURL: URL(string: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f")),
-        Track(title: "Sunset Drive", artist: "Mira Lane", artworkURL: URL(string: "https://images.unsplash.com/photo-1461784180009-21121b2f204c")),
-        Track(title: "City Lights", artist: "North Atlas", artworkURL: URL(string: "https://images.unsplash.com/photo-1511379938547-c1f69419868d"))
-    ]
-
-    static let recent: [Track] = [
-        Track(title: "After Hours", artist: "Chrome Avenue", artworkURL: URL(string: "https://images.unsplash.com/photo-1516450360452-9312f5e86fc7")),
-        Track(title: "Ocean Avenue", artist: "The Blue Tape", artworkURL: URL(string: "https://images.unsplash.com/photo-1471478331149-c72f17e33c73")),
-        Track(title: "Nightliner", artist: "Vanta", artworkURL: URL(string: "https://images.unsplash.com/photo-1465847899084-d164df4dedc6"))
-    ]
-
-    static func search(query: String) -> [Track] {
-        let catalog = featured + recent
-        guard query.isEmpty == false else { return catalog }
-
-        return catalog.filter {
-            $0.title.localizedCaseInsensitiveContains(query) ||
-            $0.artist.localizedCaseInsensitiveContains(query)
-        }
-    }
-}
-
 private struct VideoSearchResponse: Decodable {
     let items: [VideoItem]
     let nextPageToken: String?

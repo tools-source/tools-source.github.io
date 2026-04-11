@@ -54,6 +54,22 @@
       border-bottom: 1px solid var(--border);
     }
 
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 26px;
+    }
+
+    .nav a {
+      padding: 10px 14px;
+      text-decoration: none;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--muted);
+    }
+
     .eyebrow {
       margin: 0 0 10px;
       font-size: 0.8rem;
@@ -127,6 +143,11 @@
   <main>
     <article class="policy">
       <header class="hero">
+        <nav class="nav" aria-label="Site">
+          <a href="./index.html">Home</a>
+          <a href="./TERMS.html">Terms</a>
+          <a href="./SUPPORT.html">Support</a>
+        </nav>
         <p class="eyebrow">MusicTube</p>
         <h1>Privacy Policy</h1>
         <p class="effective-date">Effective date: April 11, 2026</p>
@@ -140,6 +161,9 @@
           </p>
           <p>
             MusicTube is designed to work primarily on your device. The app signs you in with your Google account so it can read your YouTube profile, playlists, liked videos, and related music metadata. MusicTube does not run its own customer account system or store your library on a separate MusicTube backend.
+          </p>
+          <p class="note">
+            MusicTube is an independent app experience and is not affiliated with Google or YouTube.
           </p>
         </section>
 
@@ -219,7 +243,7 @@
         <section aria-labelledby="contact">
           <h2 id="contact">Contact</h2>
           <p class="note">
-            For privacy questions, use the support email or support website you publish with the app listing before release.
+            For privacy questions, visit the public <a href="./SUPPORT.html">support page</a> or use the project issue tracker at <a href="https://github.com/tools-source/musicTube/issues">github.com/tools-source/musicTube/issues</a>.
           </p>
         </section>
       </div>

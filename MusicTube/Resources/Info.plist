@@ -64,8 +64,6 @@
     <string>$(YOUTUBE_API_KEY)</string>
     <key>YOUTUBE_CLIENT_ID</key>
     <string>$(YOUTUBE_CLIENT_ID)</string>
-    <key>YOUTUBE_CLIENT_SECRET</key>
-    <string>$(YOUTUBE_CLIENT_SECRET)</string>
     <key>YOUTUBE_URL_SCHEME</key>
     <string>$(YOUTUBE_URL_SCHEME)</string>
     <key>YOUTUBE_REDIRECT_URI</key>

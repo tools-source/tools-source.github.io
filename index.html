@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MusicTube | iPhone and CarPlay</title>
+  <meta name="description" content="MusicTube is an iPhone and CarPlay app for browsing your own YouTube likes, playlists, and playback queue.">
+  <!-- Add your Search Console verification tag here if you verify this GitHub Pages site with a URL-prefix property. -->
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f4ef;
+      --paper: rgba(255, 255, 255, 0.9);
+      --panel: #fffdf9;
+      --text: #111111;
+      --muted: #5e5a54;
+      --border: rgba(17, 17, 17, 0.08);
+      --accent: #d44a3b;
+      --accent-strong: #a62f23;
+      --ink: #1e2c44;
+      --shadow: 0 24px 80px rgba(25, 24, 22, 0.1);
+      --radius: 28px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "SF Pro Display", "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(212, 74, 59, 0.16), transparent 28%),
+        radial-gradient(circle at 85% 15%, rgba(30, 44, 68, 0.14), transparent 22%),
+        linear-gradient(180deg, #fffdf8 0%, var(--bg) 100%);
+      line-height: 1.6;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .shell {
+      width: min(1100px, calc(100% - 32px));
+      margin: 24px auto 48px;
+    }
+
+    .hero {
+      padding: 24px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 8px);
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(255, 250, 244, 0.96)),
+        var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -10% -35% 45%;
+      height: 340px;
+      background: radial-gradient(circle, rgba(212, 74, 59, 0.14), transparent 65%);
+      pointer-events: none;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 48px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .brand {
+      text-decoration: none;
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .nav-links a,
+    .button,
+    .ghost-button {
+      text-decoration: none;
+      border-radius: 999px;
+      transition: transform 160ms ease, background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+    }
+
+    .nav-links a {
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .nav-links a:hover,
+    .button:hover,
+    .ghost-button:hover {
+      transform: translateY(-1px);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.9fr);
+      gap: 28px;
+      align-items: stretch;
+      position: relative;
+      z-index: 1;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      margin: 0 0 14px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(30, 44, 68, 0.08);
+      color: var(--ink);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(2.7rem, 6vw, 5.1rem);
+      line-height: 0.95;
+      letter-spacing: -0.06em;
+      max-width: 10ch;
+    }
+
+    .lede {
+      margin: 0 0 22px;
+      max-width: 60ch;
+      font-size: 1.04rem;
+      color: var(--muted);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .button,
+    .ghost-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 13px 18px;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+
+    .button {
+      background: var(--accent);
+      color: white;
+    }
+
+    .button:hover {
+      background: var(--accent-strong);
+    }
+
+    .ghost-button {
+      border-color: var(--border);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .mini-card,
+    .panel,
+    .feature-card {
+      background: var(--paper);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      backdrop-filter: blur(14px);
+    }
+
+    .mini-card {
+      padding: 16px;
+    }
+
+    .mini-card strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.95rem;
+    }
+
+    .mini-card span {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .panel {
+      padding: 22px;
+      align-self: stretch;
+    }
+
+    .panel h2,
+    .section h2 {
+      margin: 0 0 10px;
+      font-size: 1.28rem;
+      letter-spacing: -0.03em;
+    }
+
+    .panel p,
+    .section p {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+
+    .stat {
+      padding: 14px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .stat:first-of-type {
+      border-top: 0;
+      padding-top: 4px;
+    }
+
+    .stat strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 1.02rem;
+    }
+
+    .section {
+      margin-top: 24px;
+      padding: 28px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: 0 16px 40px rgba(25, 24, 22, 0.06);
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .feature-card {
+      padding: 20px;
+    }
+
+    .feature-card h3 {
+      margin: 0 0 10px;
+      font-size: 1.05rem;
+      letter-spacing: -0.03em;
+    }
+
+    .feature-card p,
+    .legal-links p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .transparency-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .transparency-item {
+      padding: 18px 20px;
+      border-radius: 22px;
+      background: #fff;
+      border: 1px solid var(--border);
+    }
+
+    .transparency-item strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 1rem;
+    }
+
+    .transparency-item p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .legal-links {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .legal-links a {
+      display: block;
+      padding: 20px;
+      border-radius: 22px;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      text-decoration: none;
+    }
+
+    footer {
+      margin-top: 18px;
+      padding: 22px 8px 8px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    @media (max-width: 920px) {
+      .hero-grid,
+      .feature-grid,
+      .transparency-list,
+      .legal-links {
+        grid-template-columns: 1fr;
+      }
+
+      .mini-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: min(100%, calc(100% - 20px));
+        margin: 12px auto 28px;
+      }
+
+      .hero,
+      .section {
+        padding: 20px;
+      }
+
+      .nav {
+        flex-direction: column;
+        align-items: flex-start;
+        margin-bottom: 28px;
+      }
+
+      h1 {
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <nav class="nav" aria-label="Site">
+        <a class="brand" href="./index.html">MusicTube</a>
+        <div class="nav-links">
+          <a href="./PRIVACY_POLICY.html">Privacy</a>
+          <a href="./TERMS.html">Terms</a>
+          <a href="./SUPPORT.html">Support</a>
+        </div>
+      </nav>
+
+      <div class="hero-grid">
+        <div>
+          <p class="eyebrow">iPhone and CarPlay</p>
+          <h1>Your YouTube library, shaped for the road.</h1>
+          <p class="lede">
+            MusicTube is an independent iPhone and CarPlay app that helps signed-in users browse their own YouTube likes, playlists, uploads, and playback queue in a cleaner in-car and on-phone experience.
+          </p>
+          <div class="actions">
+            <a class="button" href="./PRIVACY_POLICY.html">Read Privacy Policy</a>
+            <a class="ghost-button" href="./SUPPORT.html">Open Support</a>
+          </div>
+          <div class="mini-grid" aria-label="Highlights">
+            <div class="mini-card">
+              <strong>For You and mixes</strong>
+              <span>Home surfaces music from your own library and mix-style playlists.</span>
+            </div>
+            <div class="mini-card">
+              <strong>Queue-aware playback</strong>
+              <span>Next, previous, and now playing controls follow the current listening queue.</span>
+            </div>
+            <div class="mini-card">
+              <strong>Shared app state</strong>
+              <span>Phone and CarPlay browse the same signed-in account content and collections.</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel" aria-labelledby="overview">
+          <h2 id="overview">What this app does</h2>
+          <p>
+            MusicTube signs in with your Google account so it can read your public profile basics and your read-only YouTube library data, then presents that content in an app layout designed for playback and browsing.
+          </p>
+          <div class="stat">
+            <strong>Account access</strong>
+            <span>Read-only access to the YouTube library data needed to show playlists, likes, uploads, and search-based music results.</span>
+          </div>
+          <div class="stat">
+            <strong>On-device state</strong>
+            <span>Session and playback metadata are stored locally on the device to support sign-in persistence, lock screen controls, and CarPlay.</span>
+          </div>
+          <div class="stat">
+            <strong>Independent product</strong>
+            <span>MusicTube is not affiliated with Google or YouTube and does not operate a separate hosted MusicTube account system.</span>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="features">
+      <h2 id="features">Core product surface</h2>
+      <p>
+        This homepage is the public-facing description of the app used for release, support, and OAuth branding review. It is intentionally accessible without login and links directly to the legal pages for the app.
+      </p>
+      <div class="feature-grid">
+        <article class="feature-card">
+          <h3>Library-first browsing</h3>
+          <p>Users can open playlists, liked songs, and uploads pulled from the YouTube account they explicitly sign into.</p>
+        </article>
+        <article class="feature-card">
+          <h3>Playback built for iPhone and CarPlay</h3>
+          <p>MusicTube supports queue navigation, now playing metadata, remote controls, and a matching CarPlay browsing experience.</p>
+        </article>
+        <article class="feature-card">
+          <h3>Transparent data use</h3>
+          <p>The app explains what account information is accessed, why it is requested, and where users can read the privacy policy and terms.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="transparency">
+      <h2 id="transparency">Data and permissions at a glance</h2>
+      <p>
+        MusicTube requests only the information required to authenticate the user and display the music-related account data they ask the app to load.
+      </p>
+      <div class="transparency-list">
+        <div class="transparency-item">
+          <strong>Google profile basics</strong>
+          <p>Name and email can be used to show who is signed in and support account restore between launches.</p>
+        </div>
+        <div class="transparency-item">
+          <strong>YouTube read-only data</strong>
+          <p>Playlists, liked items, uploads, and search results are used to build the Home, Search, Library, and CarPlay screens.</p>
+        </div>
+        <div class="transparency-item">
+          <strong>Playback metadata</strong>
+          <p>Now playing details are used for lock screen controls, remote commands, and CarPlay integration while audio is playing.</p>
+        </div>
+        <div class="transparency-item">
+          <strong>Local-only storage</strong>
+          <p>Session data and lightweight playback cache stay on the device and are not copied into a MusicTube-operated account backend.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="legal">
+      <h2 id="legal">Legal and support links</h2>
+      <p>
+        These pages are kept public so users and reviewers can understand the app before they sign in.
+      </p>
+      <div class="legal-links">
+        <a href="./PRIVACY_POLICY.html">
+          <strong>Privacy Policy</strong>
+          <p>How MusicTube accesses, uses, and stores account and playback information.</p>
+        </a>
+        <a href="./TERMS.html">
+          <strong>Terms of Service</strong>
+          <p>Usage terms for the app, third-party account access, and release limitations.</p>
+        </a>
+        <a href="./SUPPORT.html">
+          <strong>Support</strong>
+          <p>Public support entry point, troubleshooting notes, and release contact directions.</p>
+        </a>
+      </div>
+    </section>
+
+    <footer>
+      MusicTube is an independent app experience for iPhone and CarPlay. Google, YouTube, and related product names remain the property of their respective owners.
+    </footer>
+  </main>
+</body>
+</html>

@@ -36,7 +36,7 @@ final class YouTubeAuthService: NSObject, AuthProviding {
             case .missingConfig(let key):
                 return "Missing \(key) in Info.plist"
             case .placeholderConfig(let key):
-                return "\(key) still uses the checked-in placeholder value. Replace it in MusicTube/Resources/Secrets.xcconfig before signing in."
+                return "\(key) still uses the checked-in placeholder value. Replace it in MusicTube/Resources/Secrets.local.xcconfig before signing in."
             case .invalidClientIDFormat:
                 return "YOUTUBE_CLIENT_ID does not look like a Google OAuth client ID. It should usually end with .apps.googleusercontent.com."
             case .failedToStartSession:
@@ -84,7 +84,6 @@ final class YouTubeAuthService: NSObject, AuthProviding {
 
     func signIn() async throws -> YouTubeSession {
         let clientID = try configValue(for: "YOUTUBE_CLIENT_ID")
-        let clientSecret = Bundle.main.object(forInfoDictionaryKey: "YOUTUBE_CLIENT_SECRET") as? String
         let redirectURIString = try configValue(for: "YOUTUBE_REDIRECT_URI")
 
         guard let redirectURI = URL(string: redirectURIString), let callbackScheme = redirectURI.scheme else {
@@ -115,17 +114,13 @@ final class YouTubeAuthService: NSObject, AuthProviding {
         let callbackURL = try await beginWebAuth(url: authURL, callbackScheme: callbackScheme)
         let code = try Self.authorizationCode(from: callbackURL, expectedState: state)
 
-        var tokenParams: [String: String] = [
+        let tokenParams: [String: String] = [
             "client_id": clientID,
             "code": code,
             "code_verifier": codeVerifier,
             "grant_type": "authorization_code",
             "redirect_uri": redirectURIString
         ]
-
-        if let clientSecret, clientSecret.isEmpty == false {
-            tokenParams["client_secret"] = clientSecret
-        }
 
         var request = URLRequest(url: Constants.tokenEndpoint)
         request.httpMethod = "POST"
@@ -166,17 +161,11 @@ final class YouTubeAuthService: NSObject, AuthProviding {
         }
 
         let clientID = try configValue(for: "YOUTUBE_CLIENT_ID")
-        let clientSecret = Bundle.main.object(forInfoDictionaryKey: "YOUTUBE_CLIENT_SECRET") as? String
-
-        var tokenParams: [String: String] = [
+        let tokenParams: [String: String] = [
             "client_id": clientID,
             "grant_type": "refresh_token",
             "refresh_token": refreshToken
         ]
-
-        if let clientSecret, clientSecret.isEmpty == false {
-            tokenParams["client_secret"] = clientSecret
-        }
 
         var request = URLRequest(url: Constants.tokenEndpoint)
         request.httpMethod = "POST"
