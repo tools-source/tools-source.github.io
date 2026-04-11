@@ -1,0 +1,23 @@
+import Foundation
+
+protocol AuthProviding {
+    func restoreSession() async -> YouTubeSession?
+    func signIn() async throws -> YouTubeSession
+    func signOut() async
+}
+
+protocol MusicCatalogProviding {
+    func loadHome(accessToken: String) async throws -> (featured: [Track], recent: [Track])
+    func search(query: String, accessToken: String) async throws -> [Track]
+    func loadPlaylists(accessToken: String) async throws -> [Playlist]
+    func loadPlaylistItems(for playlist: Playlist, accessToken: String) async throws -> [Track]
+}
+
+@MainActor
+protocol PlaybackControlling: AnyObject {
+    var nowPlaying: Track? { get }
+    var isPlaying: Bool { get }
+    func play(track: Track)
+    func resume()
+    func pause()
+}

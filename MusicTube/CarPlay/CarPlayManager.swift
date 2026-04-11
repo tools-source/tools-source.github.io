@@ -1,0 +1,330 @@
+import CarPlay
+import UIKit
+
+@MainActor
+final class CarPlayManager: NSObject {
+    private weak var interfaceController: CPInterfaceController?
+    private weak var appState: AppState?
+
+    private var homeTemplate: CPListTemplate?
+    private var libraryTemplate: CPListTemplate?
+    private var searchTemplate: CPSearchTemplate?
+    private var tabBarTemplate: CPTabBarTemplate?
+    private var searchResultsByIdentifier: [String: Track] = [:]
+    private var currentSearchResults: [Track] = []
+
+    func attach(interfaceController: CPInterfaceController) {
+        self.interfaceController = interfaceController
+        appState = AppContainer.shared.appState
+        installRootTemplateIfNeeded()
+    }
+
+    func detach() {
+        interfaceController = nil
+        homeTemplate = nil
+        libraryTemplate = nil
+        searchTemplate = nil
+        tabBarTemplate = nil
+        searchResultsByIdentifier = [:]
+        currentSearchResults = []
+    }
+
+    func refresh(using appState: AppState) {
+        self.appState = appState
+        installRootTemplateIfNeeded()
+
+        homeTemplate?.updateSections(homeSections(using: appState))
+        libraryTemplate?.updateSections(librarySections(using: appState))
+    }
+
+    private func installRootTemplateIfNeeded() {
+        guard let interfaceController else { return }
+        guard tabBarTemplate == nil else { return }
+
+        let currentAppState = appState ?? AppContainer.shared.appState
+
+        let homeTemplate = CPListTemplate(
+            title: "Home",
+            sections: homeSections(using: currentAppState)
+        )
+        homeTemplate.tabTitle = "Home"
+        homeTemplate.tabImage = UIImage(systemName: "house.fill")
+        homeTemplate.trailingNavigationBarButtons = [makeSearchBarButton()]
+
+        let searchTemplate = CPSearchTemplate()
+        searchTemplate.delegate = self
+
+        let libraryTemplate = CPListTemplate(
+            title: "Library",
+            sections: librarySections(using: currentAppState)
+        )
+        libraryTemplate.tabTitle = "Library"
+        libraryTemplate.tabImage = UIImage(systemName: "music.note.list")
+        libraryTemplate.trailingNavigationBarButtons = [makeSearchBarButton()]
+
+        let tabBarTemplate = CPTabBarTemplate(templates: [
+            homeTemplate,
+            libraryTemplate
+        ])
+
+        self.homeTemplate = homeTemplate
+        self.searchTemplate = searchTemplate
+        self.libraryTemplate = libraryTemplate
+        self.tabBarTemplate = tabBarTemplate
+
+        interfaceController.setRootTemplate(tabBarTemplate, animated: true, completion: nil)
+    }
+
+    private func homeSections(using appState: AppState?) -> [CPListSection] {
+        guard let appState, appState.authState == .signedIn else {
+            return [
+                section(
+                    header: "Home",
+                    items: [
+                        messageItem(
+                            title: "Sign in on your iPhone",
+                            detailText: "Your Home recommendations will appear here."
+                        )
+                    ]
+                )
+            ]
+        }
+
+        let featuredItems: [CPListItem]
+        if appState.featuredTracks.isEmpty, appState.isLoading {
+            featuredItems = [messageItem(title: "Loading For You...")]
+        } else if appState.featuredTracks.isEmpty {
+            featuredItems = [
+                messageItem(
+                    title: "No recommendations yet",
+                    detailText: "Pull to refresh on the phone and try again."
+                )
+            ]
+        } else {
+            featuredItems = appState.featuredTracks.map { trackItem(for: $0, queue: appState.featuredTracks, appState: appState) }
+        }
+
+        let mixItems: [CPListItem]
+        if appState.homeMixAlbums.isEmpty, appState.isLoadingPlaylists {
+            mixItems = [messageItem(title: "Loading mix albums...")]
+        } else if appState.homeMixAlbums.isEmpty {
+            mixItems = [
+                messageItem(
+                    title: "No mix albums yet",
+                    detailText: "Your playlists and collections will show up here."
+                )
+            ]
+        } else {
+            mixItems = appState.homeMixAlbums.map { playlistItem(for: $0, appState: appState) }
+        }
+
+        return [
+            section(header: "For You", items: featuredItems),
+            section(header: "Mix Albums", items: mixItems)
+        ]
+    }
+
+    private func librarySections(using appState: AppState?) -> [CPListSection] {
+        guard let appState, appState.authState == .signedIn else {
+            return [
+                section(
+                    header: "Library",
+                    items: [
+                        messageItem(
+                            title: "Sign in on your iPhone",
+                            detailText: "Your collections will appear here."
+                        )
+                    ]
+                )
+            ]
+        }
+
+        var sections: [CPListSection] = []
+
+        if let user = appState.user {
+            sections.append(
+                section(
+                    header: "Account",
+                    items: [messageItem(title: user.name, detailText: user.email)]
+                )
+            )
+        }
+
+        let playlistItems: [CPListItem]
+        if appState.playlists.isEmpty, appState.isLoadingPlaylists {
+            playlistItems = [messageItem(title: "Importing collections...")]
+        } else if appState.playlists.isEmpty {
+            playlistItems = [
+                messageItem(
+                    title: "No playlists or liked collections found",
+                    detailText: "Refresh the library on the phone to try again."
+                )
+            ]
+        } else {
+            playlistItems = appState.playlists.map { playlistItem(for: $0, appState: appState) }
+        }
+
+        sections.append(section(header: "All Collections", items: playlistItems))
+        return sections
+    }
+
+    private func section(header: String, items: [CPListItem]) -> CPListSection {
+        CPListSection(items: items, header: header, sectionIndexTitle: nil)
+    }
+
+    private func makeSearchBarButton() -> CPBarButton {
+        let searchButton = CPBarButton(image: UIImage(systemName: "magnifyingglass") ?? UIImage()) { [weak self] _ in
+            self?.showSearch()
+        }
+        searchButton.buttonStyle = .rounded
+        return searchButton
+    }
+
+    private func showSearch() {
+        guard let interfaceController, let searchTemplate else { return }
+        interfaceController.pushTemplate(searchTemplate, animated: true, completion: nil)
+    }
+
+    private func trackItem(for track: Track, queue: [Track], appState: AppState) -> CPListItem {
+        let item = CPListItem(text: track.title, detailText: track.artist)
+        item.userInfo = trackIdentifier(for: track)
+
+        item.handler = { [weak self] _, completion in
+            appState.play(track: track, queue: queue)
+            self?.interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+            completion()
+        }
+
+        return item
+    }
+
+    private func playlistItem(for playlist: Playlist, appState: AppState) -> CPListItem {
+        let item = CPListItem(text: playlist.title, detailText: playlistSubtitle(for: playlist))
+        item.accessoryType = .disclosureIndicator
+        item.userInfo = playlist.id
+
+        item.handler = { [weak self] _, completion in
+            self?.showPlaylist(playlist, appState: appState)
+            completion()
+        }
+
+        return item
+    }
+
+    private func messageItem(title: String, detailText: String? = nil) -> CPListItem {
+        let item = CPListItem(text: title, detailText: detailText)
+        item.userInfo = nil
+        return item
+    }
+
+    private func showPlaylist(_ playlist: Playlist, appState: AppState) {
+        guard let interfaceController else { return }
+
+        let template = CPListTemplate(
+            title: playlist.title,
+            sections: [section(header: "Tracks", items: [messageItem(title: "Loading playlist tracks...")])]
+        )
+        template.trailingNavigationBarButtons = [makeSearchBarButton()]
+
+        interfaceController.pushTemplate(template, animated: true, completion: nil)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let tracks = await appState.loadPlaylistItems(for: playlist)
+
+            if tracks.isEmpty {
+                template.updateSections([
+                    section(
+                        header: "Tracks",
+                        items: [
+                            messageItem(
+                                title: "No playable YouTube items yet",
+                                detailText: "This collection is empty or still loading."
+                            )
+                        ]
+                    )
+                ])
+                return
+            }
+
+            template.updateSections([
+                section(
+                    header: "Tracks",
+                    items: tracks.map { self.trackItem(for: $0, queue: tracks, appState: appState) }
+                )
+            ])
+        }
+    }
+
+    private func playlistSubtitle(for playlist: Playlist) -> String {
+        switch playlist.kind {
+        case .likedMusic:
+            return "Music only"
+        case .uploads:
+            return playlist.itemCount == 1 ? "1 upload" : "\(playlist.itemCount) uploads"
+        case .standard:
+            return playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks"
+        }
+    }
+
+    private func trackIdentifier(for track: Track) -> String {
+        track.youtubeVideoID ?? track.id
+    }
+}
+
+extension CarPlayManager: CPSearchTemplateDelegate {
+    func searchTemplate(
+        _ searchTemplate: CPSearchTemplate,
+        updatedSearchText searchText: String,
+        completionHandler: @escaping ([CPListItem]) -> Void
+    ) {
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let appState, trimmedSearchText.isEmpty == false else {
+            searchResultsByIdentifier = [:]
+            currentSearchResults = []
+            completionHandler([])
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else {
+                completionHandler([])
+                return
+            }
+
+            let results = await appState.search(query: trimmedSearchText)
+            currentSearchResults = results
+            searchResultsByIdentifier = Dictionary(
+                uniqueKeysWithValues: results.map { (self.trackIdentifier(for: $0), $0) }
+            )
+
+            let items = results.prefix(20).map { track -> CPListItem in
+                let item = CPListItem(text: track.title, detailText: track.artist)
+                item.userInfo = self.trackIdentifier(for: track)
+                return item
+            }
+
+            completionHandler(Array(items))
+        }
+    }
+
+    func searchTemplate(
+        _ searchTemplate: CPSearchTemplate,
+        selectedResult item: CPListItem,
+        completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+
+        guard
+            let appState,
+            let identifier = item.userInfo as? String,
+            let track = searchResultsByIdentifier[identifier]
+        else {
+            return
+        }
+
+        appState.play(track: track, queue: currentSearchResults)
+        interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+    }
+}
