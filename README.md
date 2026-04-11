@@ -61,7 +61,7 @@ After Apple approves the CarPlay audio entitlement for your App ID, add this key
 
 - Build and run on an iPhone simulator/device.
 - CarPlay UI can be tested using the iOS Simulator's CarPlay external display mode.
-- Privacy policy: [PRIVACY_POLICY.md](/Users/majdinagi/Documents/musicapp/PRIVACY_POLICY.md)
+- Privacy policy: [PRIVACY_POLICY.html](/Users/majdinagi/Documents/musicapp/PRIVACY_POLICY.html)
 
 ## Next recommended production steps
 
