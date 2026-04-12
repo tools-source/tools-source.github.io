@@ -42,7 +42,7 @@ final class DownloadService: NSObject, ObservableObject {
 
     static let shared = DownloadService()
 
-    static var downloadsDirectory: URL {
+    nonisolated static var downloadsDirectory: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("MusicTubeDownloads", isDirectory: true)
     }

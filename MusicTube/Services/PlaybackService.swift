@@ -135,6 +135,24 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
     }
 
+    /// Eagerly warms the stream cache for a list of tracks (call when tracks first appear on screen).
+    func prefetchStreams(for tracks: [Track]) {
+        let candidates = tracks
+            .filter { $0.youtubeVideoID != nil && $0.streamURL == nil }
+            .prefix(6)                      // warm top 6 to keep memory reasonable
+
+        for track in candidates {
+            let key = cacheKey(for: track)
+            guard streamCandidateCache[key] == nil, prefetchTasks[key] == nil else { continue }
+
+            prefetchTasks[key] = Task { [weak self, track] in
+                guard let self else { return }
+                defer { Task { @MainActor in self.prefetchTasks.removeValue(forKey: key) } }
+                _ = try? await self.resolveAndCacheStreamCandidates(for: track)
+            }
+        }
+    }
+
     /// Resolves the best audio stream URL for a track (used by DownloadService).
     func resolveStreamURL(for track: Track) async throws -> URL? {
         let candidates = try await resolveAndCacheStreamCandidates(for: track)
@@ -412,10 +430,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         let playerItem = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: playerItem)
-        player.automaticallyWaitsToMinimizeStalling = false
+        player.automaticallyWaitsToMinimizeStalling = true   // let AVPlayer buffer optimally
         player.allowsExternalPlayback = true
         player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
-        playerItem.preferredForwardBufferDuration = 2
+        playerItem.preferredForwardBufferDuration = 10        // buffer 10 s ahead so scrub is instant
         playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         self.player = player
         registerItemDidEndObserver(for: playerItem)

@@ -1,24 +1,54 @@
 import SwiftUI
 
+// MARK: - HomeFilter
+
+enum HomeFilter: String, CaseIterable {
+    case all = "All"
+    case arabic = "Arabic"
+    case worship = "Worship"
+    case playlists = "Playlists"
+    case recent = "Recent"
+}
+
+// MARK: - HomeView
+
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var selectedFilter: HomeFilter = .all
+    @State private var seeAllTitle: String = ""
+    @State private var seeAllTracks: [Track] = []
+    @State private var showSeeAll = false
 
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 28) {
-                    header
-                    quickPicksSection
-                    featuredTracksSection
-                    recentTracksSection
-                    mixAlbumsSection
+                VStack(alignment: .leading, spacing: 0) {
+                    greetingHeader
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+                        .padding(.bottom, 16)
+
+                    filterChips
+                        .padding(.bottom, 24)
+
+                    if selectedFilter == .all || selectedFilter == .recent {
+                        continueListeningSection
+                            .padding(.bottom, 28)
+                    }
+
+                    if selectedFilter == .all || selectedFilter == .arabic || selectedFilter == .worship || selectedFilter == .recent {
+                        recommendedSection
+                            .padding(.bottom, 28)
+                    }
+
+                    if selectedFilter == .all || selectedFilter == .playlists {
+                        mixesSection
+                            .padding(.bottom, 28)
+                    }
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, appState.nowPlaying == nil ? 108 : 200)
+                .padding(.bottom, appState.nowPlaying == nil ? 100 : 180)
             }
-            .navigationTitle("Home")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarHidden(true)
             .navigationDestination(for: Playlist.self) { playlist in
                 PlaylistDetailView(playlist: playlist)
             }
@@ -30,296 +60,451 @@ struct HomeView: View {
                     await appState.refreshDashboard()
                 }
             }
-            .background(homeBackground.ignoresSafeArea())
+            .background(Color.black.ignoresSafeArea())
+            .sheet(isPresented: $showSeeAll) {
+                TrackListSheet(title: seeAllTitle, tracks: seeAllTracks)
+                    .environmentObject(appState)
+            }
         }
     }
 
-    // MARK: Header
+    // MARK: Greeting Header
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Discover")
-                .font(.system(size: 34, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text("A denser home feed built from your likes, mixes, and recently played songs.")
-                .font(.subheadline)
-                .foregroundStyle(Color.white.opacity(0.65))
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 12) {
-                Button {
-                    Task { await appState.refreshHome() }
-                } label: {
-                    Label("Shuffle Picks", systemImage: "shuffle")
-                        .font(.subheadline.weight(.semibold))
+    private var greetingHeader: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(greeting)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.6))
+                if let name = appState.user?.name.components(separatedBy: " ").first {
+                    Text(name)
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 1, green: 0.23, blue: 0.42))
-                .disabled(appState.isLoading)
+            }
 
-                if appState.isLoading {
-                    HStack(spacing: 6) {
-                        ProgressView().tint(.white).scaleEffect(0.8)
-                        Text("Refreshing")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(Color.white.opacity(0.65))
-                    }
+            Spacer()
+
+            // Avatar
+            if let user = appState.user {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 0.85, green: 0.22, blue: 0.22))
+                        .frame(width: 42, height: 42)
+                    Text(initials(from: user.name))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.18, green: 0.05, blue: 0.13),
-                            Color(red: 0.08, green: 0.07, blue: 0.14)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-                }
-        )
     }
 
-    // MARK: For You — 2-column grid
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12:  return "Good morning,"
+        case 12..<17: return "Good afternoon,"
+        case 17..<21: return "Good evening,"
+        default:      return "Good night,"
+        }
+    }
+
+    private func initials(from name: String) -> String {
+        let parts = name.components(separatedBy: " ").filter { !$0.isEmpty }
+        let letters = parts.prefix(2).compactMap { $0.first.map(String.init) }
+        return letters.joined().uppercased()
+    }
+
+    // MARK: Filter Chips
+
+    private var filterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(HomeFilter.allCases, id: \.self) { filter in
+                    FilterChip(
+                        title: filter.rawValue,
+                        isSelected: selectedFilter == filter
+                    ) {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                            selectedFilter = filter
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 2)
+        }
+    }
+
+    // MARK: Continue Listening
 
     @ViewBuilder
-    private var quickPicksSection: some View {
+    private var continueListeningSection: some View {
+        let tracks = filteredContinueListening
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("For You")
+            sectionHeader(title: "Continue Listening", showSeeAll: !tracks.isEmpty) {
+                seeAllTitle = "Continue Listening"
+                seeAllTracks = tracks
+                showSeeAll = true
+            }
+            .padding(.horizontal, 20)
 
-            if appState.featuredTracks.isEmpty {
-                if appState.isLoading {
-                    skeletonGrid
-                } else {
-                    infoCard(
-                        appState.homeStatusMessage ??
-                            (appState.isUsingLocalLibraryFallback
-                                ? "Play a few songs and we'll build your personalised picks."
-                                : "Pull to refresh once your library finishes loading.")
-                    )
-                }
+            if !appState.hasLoadedHome || (appState.isLoading && tracks.isEmpty) {
+                skeletonContinueListening
+            } else if tracks.isEmpty {
+                emptyStateCard("No recent tracks yet. Search and play something!")
+                    .padding(.horizontal, 20)
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                    spacing: 12
-                ) {
-                    ForEach(Array(appState.featuredTracks.prefix(6))) { track in
-                        CompactTrackCard(track: track) {
-                            appState.play(track: track, queue: homePlaybackQueue)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(Array(tracks.prefix(8).enumerated()), id: \.element.id) { index, track in
+                            ContinueListeningCard(track: track, isNew: index == 0) {
+                                appState.play(track: track, queue: Array(tracks))
+                            }
                         }
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 4)
                 }
             }
         }
     }
 
-    // MARK: More Songs
+    // MARK: Recommended
 
     @ViewBuilder
-    private var featuredTracksSection: some View {
-        let extra = Array(appState.featuredTracks.dropFirst(6).prefix(10))
-        if extra.isEmpty == false {
-            VStack(alignment: .leading, spacing: 10) {
-                sectionHeader("More Songs")
-                VStack(spacing: 0) {
-                    ForEach(extra) { track in
-                        TrackRowView(track: track) {
-                            appState.play(track: track, queue: homePlaybackQueue)
-                        }
-                        if track.id != extra.last?.id {
-                            Divider().overlay(Color.white.opacity(0.06)).padding(.leading, 76)
-                        }
-                    }
-                }
-                .padding(14)
-                .background(glassCard(cornerRadius: 22))
-            }
-        }
-    }
-
-    // MARK: From Library
-
-    @ViewBuilder
-    private var recentTracksSection: some View {
-        if appState.recentTracks.isEmpty == false {
-            VStack(alignment: .leading, spacing: 10) {
-                sectionHeader("From Your Library")
-                VStack(spacing: 0) {
-                    ForEach(Array(appState.recentTracks.prefix(8))) { track in
-                        TrackRowView(track: track) {
-                            appState.play(track: track, queue: homePlaybackQueue)
-                        }
-                        if track.id != appState.recentTracks.prefix(8).last?.id {
-                            Divider().overlay(Color.white.opacity(0.06)).padding(.leading, 76)
-                        }
-                    }
-                }
-                .padding(14)
-                .background(glassCard(cornerRadius: 22))
-            }
-        }
-    }
-
-    // MARK: Suggested Mixes
-
-    @ViewBuilder
-    private var mixAlbumsSection: some View {
+    private var recommendedSection: some View {
+        let tracks = filteredRecommended
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Suggested Mixes")
+            sectionHeader(title: "Recommended for you", showSeeAll: !tracks.isEmpty) {
+                seeAllTitle = "Recommended for you"
+                seeAllTracks = tracks
+                showSeeAll = true
+            }
+            .padding(.horizontal, 20)
 
-            if appState.suggestedMixes.isEmpty {
-                if appState.isLoadingPlaylists {
-                    skeletonRow
-                } else {
-                    infoCard(
-                        appState.libraryStatusMessage ??
-                            (appState.isUsingLocalLibraryFallback
-                                ? "Mixes appear here as you use the app."
-                                : "Mixes will load once your library finishes syncing.")
-                    )
-                }
+            if !appState.hasLoadedHome || (appState.isLoading && tracks.isEmpty) {
+                skeletonList
+                    .padding(.horizontal, 20)
+            } else if tracks.isEmpty {
+                emptyStateCard("Your recommendations will appear here.")
+                    .padding(.horizontal, 20)
             } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(tracks.prefix(10).enumerated()), id: \.element.id) { index, track in
+                        RecommendedRow(track: track) {
+                            appState.play(track: track, queue: Array(tracks))
+                        }
+                        if index < min(tracks.count, 10) - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.06))
+                                .padding(.leading, 76)
+                        }
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    // MARK: Mixes
+
+    @ViewBuilder
+    private var mixesSection: some View {
+        if !appState.suggestedMixes.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionHeader(title: "Suggested Mixes", showSeeAll: false) {}
+                    .padding(.horizontal, 20)
+
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
                         ForEach(appState.suggestedMixes) { playlist in
                             NavigationLink(value: playlist) {
-                                MixAlbumCard(playlist: playlist)
+                                MixCard(playlist: playlist)
                             }
                             .buttonStyle(.plain)
                         }
                     }
+                    .padding(.horizontal, 20)
                     .padding(.vertical, 4)
-                    .padding(.horizontal, 2)
                 }
             }
         }
     }
 
-    // MARK: Helpers
+    // MARK: Filtered data
 
-    private var homePlaybackQueue: [Track] {
-        let combined = appState.featuredTracks + appState.recentTracks
-        var seen: Set<String> = []
-        return combined.filter { seen.insert($0.youtubeVideoID ?? $0.id).inserted }
-    }
-
-    private var homeBackground: some View {
-        ZStack {
-            Color.black
-            LinearGradient(
-                colors: [Color(red: 0.03, green: 0.03, blue: 0.07), Color.black],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            Circle()
-                .fill(Color(red: 0.94, green: 0.18, blue: 0.35).opacity(0.14))
-                .frame(width: 260, height: 260)
-                .blur(radius: 90)
-                .offset(x: 130, y: -240)
+    private var filteredContinueListening: [Track] {
+        let base = appState.recentTracks.isEmpty ? appState.featuredTracks : appState.recentTracks
+        switch selectedFilter {
+        case .all, .recent: return Array(base)
+        case .arabic: return base.filter { isArabic($0) }
+        case .worship: return base.filter { isWorship($0) }
+        case .playlists: return []
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.title3.bold())
-            .foregroundStyle(.white)
+    private var filteredRecommended: [Track] {
+        let base = appState.featuredTracks
+        switch selectedFilter {
+        case .all: return base
+        case .arabic: return base.filter { isArabic($0) }
+        case .worship: return base.filter { isWorship($0) }
+        case .recent: return Array((appState.recentTracks + base).prefix(20))
+        case .playlists: return []
+        }
     }
 
-    private func infoCard(_ text: String) -> some View {
+    private func isArabic(_ track: Track) -> Bool {
+        let text = "\(track.title) \(track.artist)"
+        return text.unicodeScalars.contains { scalar in
+            (0x0600...0x06FF).contains(scalar.value) || (0x0750...0x077F).contains(scalar.value)
+        }
+    }
+
+    private func isWorship(_ track: Track) -> Bool {
+        let text = "\(track.title) \(track.artist)".lowercased()
+        let keywords = ["worship", "praise", "jesus", "god", "holy", "awakening", "hillsong", "bethel", "elevation"]
+        return keywords.contains { text.contains($0) }
+    }
+
+    // MARK: Shared helpers
+
+    private func sectionHeader(title: String, showSeeAll: Bool, action: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title)
+                .font(.title3.bold())
+                .foregroundStyle(.white)
+            Spacer()
+            if showSeeAll {
+                Button("See all", action: action)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+            }
+        }
+    }
+
+    private func emptyStateCard(_ text: String) -> some View {
         Text(text)
             .font(.subheadline)
-            .foregroundStyle(Color.white.opacity(0.68))
-            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(Color.white.opacity(0.55))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(18)
-            .background(glassCard(cornerRadius: 20))
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+            )
     }
 
-    private func glassCard(cornerRadius: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(0.03))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
-            }
-    }
+    // MARK: Skeletons
 
-    // MARK: Skeleton Loading
-
-    private var skeletonGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-            spacing: 12
-        ) {
-            ForEach(0..<6, id: \.self) { _ in
-                SkeletonCard()
+    private var skeletonContinueListening: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                ForEach(0..<4, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.white.opacity(0.07))
+                        .frame(width: 160, height: 200)
+                        .shimmering()
+                }
             }
+            .padding(.horizontal, 20)
         }
     }
 
-    private var skeletonRow: some View {
-        HStack(spacing: 14) {
-            ForEach(0..<3, id: \.self) { _ in
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
-                    .frame(width: 160, height: 200)
-                    .shimmering()
+    private var skeletonList: some View {
+        VStack(spacing: 12) {
+            ForEach(0..<4, id: \.self) { _ in
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                        .frame(width: 52, height: 52)
+                        .shimmering()
+                    VStack(alignment: .leading, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                            .frame(height: 12)
+                            .shimmering()
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.white.opacity(0.05))
+                            .frame(width: 100, height: 10)
+                            .shimmering()
+                    }
+                    Spacer()
+                }
             }
         }
     }
 }
 
-// MARK: - MixAlbumCard
+// MARK: - FilterChip
 
-private struct MixAlbumCard: View {
+private struct FilterChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isSelected ? .black : .white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule()
+                        .fill(isSelected ? Color.white : Color.white.opacity(0.12))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - ContinueListeningCard
+
+private struct ContinueListeningCard: View {
+    let track: Track
+    let isNew: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
+                        .frame(width: 160, height: 160)
+
+                    if isNew {
+                        Text("NEW")
+                            .font(.caption2.weight(.black))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .fill(Color(red: 1, green: 0.23, blue: 0.42))
+                            )
+                            .padding(8)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(track.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 3) {
+                        Text(track.artist)
+                            .font(.caption)
+                            .foregroundStyle(Color.white.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(-1)
+
+                        if let duration = track.formattedDuration {
+                            Text("· \(duration)")
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.42))
+                                .fixedSize()
+                        }
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.horizontal, 6)
+            }
+            .frame(width: 160, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - RecommendedRow
+
+private struct RecommendedRow: View {
+    let track: Track
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onTap) {
+                HStack(spacing: 12) {
+                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
+                        .frame(width: 52, height: 52)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        HStack(spacing: 3) {
+                            Text(track.artist)
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.55))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .layoutPriority(-1)
+
+                            if let duration = track.formattedDuration {
+                                Text("· \(duration)")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.38))
+                                    .fixedSize()
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {}
+                Button("Add to Queue", systemImage: "text.badge.plus") {}
+                Button("Download", systemImage: "arrow.down.circle") {
+                    // download handled externally
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+// MARK: - MixCard
+
+private struct MixCard: View {
     let playlist: Playlist
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 16)
-                .frame(width: 156, height: 156)
+        VStack(alignment: .leading, spacing: 8) {
+            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 14)
+                .frame(width: 148, height: 148)
 
             Text(playlist.title)
-                .font(.headline.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text(detailText)
-                .font(.subheadline)
-                .foregroundStyle(Color.white.opacity(0.58))
+            Text(subtitleText)
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.55))
                 .lineLimit(1)
         }
-        .frame(width: 156, alignment: .leading)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(Color.white.opacity(0.03))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
-                }
-        )
+        .frame(width: 148, alignment: .leading)
     }
 
-    private var detailText: String {
+    private var subtitleText: String {
         let count = playlist.itemCount
         switch playlist.kind {
         case .likedMusic: return count == 1 ? "1 song" : "\(count) songs"
@@ -329,79 +514,81 @@ private struct MixAlbumCard: View {
     }
 }
 
-// MARK: - CompactTrackCard
+// MARK: - TrackListSheet
 
-private struct CompactTrackCard: View {
-    let track: Track
-    let onTap: () -> Void
+struct TrackListSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let tracks: [Track]
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 8) {
-                AsyncArtworkView(url: track.artworkURL, cornerRadius: 16)
-                    .aspectRatio(1, contentMode: .fit)   // always square, no fixed height
-                    .clipped()
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                        Button {
+                            appState.play(track: track, queue: tracks)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(Color.white.opacity(0.3))
+                                    .frame(width: 20, alignment: .trailing)
 
-                Text(track.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                                AsyncArtworkView(url: track.artworkURL, cornerRadius: 8)
+                                    .frame(width: 44, height: 44)
 
-                Text(track.artist)
-                    .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.55))
-                    .lineLimit(1)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(track.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                    Text(track.artist)
+                                        .font(.caption)
+                                        .foregroundStyle(Color.white.opacity(0.5))
+                                        .lineLimit(1)
+                                }
+
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                        }
+                        .buttonStyle(.plain)
+
+                        if index < tracks.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 92)
+                        }
+                    }
+                }
+                .padding(.bottom, 20)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(Color.white.opacity(0.03))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
-                    }
-            )
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                }
+            }
+            .background(Color.black.ignoresSafeArea())
         }
-        .buttonStyle(.plain)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
     }
 }
 
-// MARK: - SkeletonCard
+// MARK: - Track+formattedDuration
 
-private struct SkeletonCard: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.08))
-                .aspectRatio(1, contentMode: .fit)
-                .shimmering()
-
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.08))
-                .frame(height: 12)
-                .shimmering()
-
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.05))
-                .frame(width: 80, height: 10)
-                .shimmering()
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-        )
-    }
+private extension Track {
+    var formattedDuration: String? { nil } // populated by playback; kept as hook
 }
 
-// MARK: - Shimmer modifier
+// MARK: - Shimmer
 
 private struct ShimmerModifier: ViewModifier {
     @State private var phase: CGFloat = 0
@@ -411,11 +598,7 @@ private struct ShimmerModifier: ViewModifier {
             .overlay {
                 GeometryReader { geo in
                     LinearGradient(
-                        colors: [
-                            Color.white.opacity(0),
-                            Color.white.opacity(0.08),
-                            Color.white.opacity(0)
-                        ],
+                        colors: [.clear, Color.white.opacity(0.07), .clear],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
@@ -433,7 +616,5 @@ private struct ShimmerModifier: ViewModifier {
 }
 
 private extension View {
-    func shimmering() -> some View {
-        modifier(ShimmerModifier())
-    }
+    func shimmering() -> some View { modifier(ShimmerModifier()) }
 }

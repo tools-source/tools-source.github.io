@@ -13,7 +13,8 @@ struct PlayerView: View {
 
     var body: some View {
         ZStack {
-            playerBackground
+            // Background fills edge-to-edge behind the status bar
+            playerBackground.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 24) {
@@ -29,11 +30,11 @@ struct PlayerView: View {
                     }
                 }
                 .padding(.horizontal, 24)
-                .padding(.top, 18)
+                .padding(.top, 8)   // safe area is now respected by ScrollView
                 .padding(.bottom, 40)
             }
+            // Let ScrollView respect top safe area so header stays below status bar
         }
-        .ignoresSafeArea()
         .onAppear { syncScrubber() }
         .onChange(of: track.id) { _, _ in syncScrubber() }
         .onChange(of: appState.playbackPosition) { _, _ in
@@ -97,7 +98,8 @@ struct PlayerView: View {
                         .frame(width: 40, height: 40)
 
                     if downloadService.isDownloading(track) {
-                        let progress = downloadService.downloadProgress(for: track) ?? 0
+                        let key = track.youtubeVideoID ?? track.id
+                        let progress = downloadService.activeDownloads[key]?.progress ?? 0
                         CircularProgress(progress: progress)
                             .frame(width: 22, height: 22)
                     } else if downloadService.isDownloaded(track) {

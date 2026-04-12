@@ -260,6 +260,8 @@ final class AppState: ObservableObject {
                 featuredTracks = home.featured
                 recentTracks = home.recent
                 homeStatusMessage = nil
+                // Warm stream cache immediately so first tap plays faster
+                playbackService.prefetchStreams(for: home.featured + home.recent)
                 await rebuildSuggestedMixes()
                 AppContainer.shared.carPlayManager?.refresh(using: self)
                 return

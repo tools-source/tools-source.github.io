@@ -231,7 +231,11 @@ final class CarPlayManager: NSObject {
             ]
         }
 
-        let appState = self.appState ?? AppContainer.shared.appState
+        guard let appState = self.appState ?? AppContainer.shared.appState else {
+            return [section(header: "Downloaded", items: downloads.reversed().map { _ in
+                messageItem(title: "Tap to play", detailText: nil)
+            })]
+        }
         let tracks = downloads.reversed().map(\.localTrack)
         let items = tracks.map { trackItem(for: $0, queue: tracks, appState: appState) }
         return [section(header: "Downloaded", items: items)]
