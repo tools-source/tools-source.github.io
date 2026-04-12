@@ -1,0 +1,16 @@
+{
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "MusicTube",
+      "MusicTube/**",
+      "MusicTube.xcodeproj",
+      "MusicTube.xcodeproj/**",
+      "scripts",
+      "scripts/**"
+    ]
+  }
+}
