@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import MediaPlayer
+import UIKit
 
 @MainActor
 final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
@@ -10,22 +11,33 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     @Published private(set) var playbackErrorMessage: String?
     @Published private(set) var hasNextTrack = false
     @Published private(set) var hasPreviousTrack = false
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var duration: TimeInterval = 0
 
     private var player: AVPlayer?
     private var activeStreamURL: URL?
     private var playbackObservation: NSKeyValueObservation?
     private var playerItemStatusObservation: NSKeyValueObservation?
+    private var playerItemDurationObservation: NSKeyValueObservation?
     private var playbackStartupTask: Task<Void, Never>?
     private var resolveTask: Task<Void, Never>?
+    private var artworkLoadTask: Task<Void, Never>?
+    private var timeObserverToken: Any?
     private var playbackQueue: [Track] = []
     private var playbackQueueIndex: Int?
     private var itemDidEndObserver: NSObjectProtocol?
+    private var interruptionObserver: NSObjectProtocol?
+    private var streamCandidateCache: [String: [URL]] = [:]
+    private var prefetchTasks: [String: Task<Void, Never>] = [:]
     private let commandCenter = MPRemoteCommandCenter.shared()
+    private let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+    private let artworkCache = NSCache<NSURL, UIImage>()
 
     override init() {
         super.init()
         configureAudioSession()
         configureRemoteCommands()
+        observeAudioSessionInterruptions()
     }
 
     func play(track: Track) {
@@ -34,6 +46,12 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
     func play(track: Track, queue: [Track]?) {
         configureQueue(for: track, queue: queue)
+
+        if let currentTrack = nowPlaying, matches(currentTrack, track), player != nil {
+            resume()
+            return
+        }
+
         startPlayback(for: track)
     }
 
@@ -50,7 +68,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             player.seek(to: .zero)
             if isPlaying == false {
                 player.play()
-                isPlaying = true
+                setIsPlaying(true)
                 updatePlaybackState()
             }
             return
@@ -73,14 +91,21 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     func stop() {
         resolveTask?.cancel()
         resolveTask = nil
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
         isResolvingStream = false
         playbackErrorMessage = nil
         tearDownPlayer()
         nowPlaying = nil
-        isPlaying = false
+        setIsPlaying(false)
+        setCurrentTime(0, threshold: 0)
+        setDuration(0, threshold: 0)
         playbackQueue = []
         playbackQueueIndex = nil
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        prefetchTasks.values.forEach { $0.cancel() }
+        prefetchTasks = [:]
+        nowPlayingInfoCenter.nowPlayingInfo = nil
+        deactivateAudioSession()
         updateQueueState()
     }
 
@@ -89,13 +114,19 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         resolveTask = nil
         playbackStartupTask?.cancel()
         playbackStartupTask = nil
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
         playbackErrorMessage = nil
         nowPlaying = track
+        setCurrentTime(0, threshold: 0)
+        setDuration(0, threshold: 0)
         updateNowPlayingInfo(for: track)
         tearDownPlayer()
 
         if let streamURL = track.streamURL {
             startPlayback(fromCandidates: [streamURL], for: track)
+        } else if let cachedCandidates = cachedStreamCandidates(for: track), cachedCandidates.isEmpty == false {
+            startPlayback(fromCandidates: cachedCandidates, for: track)
         } else if track.youtubeVideoID != nil {
             isResolvingStream = true
             updatePlaybackState()
@@ -104,7 +135,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 guard let self else { return }
 
                 do {
-                    let resolvedURLs = try await self.extractPlayableStreamCandidates(for: track)
+                    let resolvedURLs = try await self.resolveAndCacheStreamCandidates(for: track)
 
                     guard Task.isCancelled == false else { return }
                     guard self.nowPlaying?.id == track.id else { return }
@@ -117,14 +148,14 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 } catch {
                     guard self.nowPlaying?.id == track.id else { return }
                     self.isResolvingStream = false
-                    self.isPlaying = false
+                    self.setIsPlaying(false)
                     self.playbackErrorMessage = "MusicTube couldn't extract audio for this YouTube item right now."
                     self.updatePlaybackState()
                 }
             }
         } else {
             isResolvingStream = false
-            isPlaying = false
+            setIsPlaying(false)
             updatePlaybackState()
         }
     }
@@ -137,10 +168,11 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
 
         if let player {
+            activateAudioSessionIfNeeded()
             player.play()
 
             if player.rate != 0 {
-                isPlaying = true
+                setIsPlaying(true)
                 updatePlaybackState()
             }
             return
@@ -158,28 +190,59 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackStartupTask = nil
         isResolvingStream = false
         player?.pause()
-        isPlaying = false
+        setIsPlaying(false)
+        updatePlaybackState()
+    }
+
+    func seek(to time: TimeInterval) {
+        guard let player else { return }
+
+        let boundedDuration = duration.isFinite && duration > 0 ? duration : time
+        let clampedTime = max(0, min(time, boundedDuration))
+        let targetTime = CMTime(seconds: clampedTime, preferredTimescale: 600)
+
+        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        setCurrentTime(clampedTime, threshold: 0)
         updatePlaybackState()
     }
 
     private func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+
         do {
-            try AVAudioSession.sharedInstance().setCategory(
+            try session.setCategory(
                 .playback,
                 mode: .default,
-                options: [.allowAirPlay]
+                policy: .longFormAudio,
+                options: []
             )
-            try AVAudioSession.sharedInstance().setActive(true)
+            try session.setActive(true)
         } catch {
-            print("Failed to configure audio session: \(error)")
+            do {
+                try session.setCategory(.playback, mode: .default, options: [.allowAirPlay])
+                try session.setActive(true)
+            } catch {
+                print("Failed to configure audio session: \(error)")
+            }
         }
     }
 
     private func configureRemoteCommands() {
+        [
+            commandCenter.playCommand,
+            commandCenter.pauseCommand,
+            commandCenter.togglePlayPauseCommand,
+            commandCenter.nextTrackCommand,
+            commandCenter.previousTrackCommand,
+            commandCenter.changePlaybackPositionCommand
+        ].forEach { $0.removeTarget(nil) }
+
         commandCenter.playCommand.isEnabled = true
         commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.nextTrackCommand.isEnabled = false
         commandCenter.previousTrackCommand.isEnabled = false
+        commandCenter.changePlaybackPositionCommand.isEnabled = false
 
         commandCenter.playCommand.addTarget { [weak self] _ in
             Task { @MainActor in
@@ -191,6 +254,13 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         commandCenter.pauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in
                 self?.pause()
+            }
+            return .success
+        }
+
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                self?.togglePlayback()
             }
             return .success
         }
@@ -208,25 +278,52 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             }
             return .success
         }
+
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+
+            Task { @MainActor in
+                self?.seek(to: event.positionTime)
+            }
+            return .success
+        }
     }
 
     private func updateNowPlayingInfo(for track: Track) {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPMediaItemPropertyArtist: track.artist,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyPlaybackQueueIndex: playbackQueueIndex ?? 0,
             MPNowPlayingInfoPropertyPlaybackQueueCount: playbackQueue.count
         ]
+
+        if duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+
+        nowPlayingInfoCenter.nowPlayingInfo = info
+        loadArtworkForNowPlaying(track)
     }
 
     private func updatePlaybackState() {
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        var info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = player?.currentTime().seconds ?? 0
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = playbackQueueIndex ?? 0
         info[MPNowPlayingInfoPropertyPlaybackQueueCount] = playbackQueue.count
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        if duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        } else {
+            info.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
+        }
+
+        nowPlayingInfoCenter.nowPlayingInfo = info
+        updateCommandAvailability()
         updateQueueState()
     }
 
@@ -234,7 +331,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackStartupTask?.cancel()
         playbackStartupTask = nil
         playerItemStatusObservation = nil
+        playerItemDurationObservation = nil
         playbackObservation = nil
+        removeTimeObserver()
         player?.pause()
         player = nil
         activeStreamURL = nil
@@ -247,7 +346,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         guard candidateIndex < uniqueCandidates.count else {
             tearDownPlayer()
             isResolvingStream = false
-            isPlaying = false
+            setIsPlaying(false)
             playbackErrorMessage = "MusicTube couldn't start audio for this YouTube item right now."
             updatePlaybackState()
             return
@@ -260,9 +359,16 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         let playerItem = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: playerItem)
-        player.automaticallyWaitsToMinimizeStalling = true
+        player.automaticallyWaitsToMinimizeStalling = false
+        player.allowsExternalPlayback = true
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        playerItem.preferredForwardBufferDuration = 2
+        playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         self.player = player
         registerItemDidEndObserver(for: playerItem)
+        observeDuration(for: playerItem, track: track)
+        installTimeObserver(on: player)
+        activateAudioSessionIfNeeded()
 
         playerItemStatusObservation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
@@ -279,6 +385,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 case .readyToPlay:
                     self.playbackStartupTask?.cancel()
                     self.playbackStartupTask = nil
+                    if let duration = self.seconds(from: item.duration) {
+                        self.setDuration(duration)
+                    }
+                    self.updatePlaybackState()
                 case .unknown:
                     break
                 @unknown default:
@@ -290,7 +400,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.isPlaying = player.timeControlStatus == .playing
+                self.setIsPlaying(player.timeControlStatus == .playing)
                 if player.timeControlStatus == .playing {
                     self.playbackStartupTask?.cancel()
                     self.playbackStartupTask = nil
@@ -301,7 +411,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         updateNowPlayingInfo(for: track)
         player.play()
-        isPlaying = false
+        setIsPlaying(false)
         updatePlaybackState()
 
         playbackStartupTask = Task { [weak self, weak player] in
@@ -328,6 +438,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackQueue = normalizedQueue
         playbackQueueIndex = normalizedQueue.firstIndex(where: { matches($0, track) }) ?? 0
         updateQueueState()
+        prewarmQueue(around: track)
     }
 
     private func normalizeQueue(_ queue: [Track], selectedTrack: Track) -> [Track] {
@@ -355,10 +466,18 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     private func updateQueueState() {
-        hasNextTrack = playbackQueueIndex.map { $0 < playbackQueue.count - 1 } ?? false
-        hasPreviousTrack = nowPlaying != nil
-        commandCenter.nextTrackCommand.isEnabled = hasNextTrack
-        commandCenter.previousTrackCommand.isEnabled = hasPreviousTrack
+        let nextTrackAvailable = playbackQueueIndex.map { $0 < playbackQueue.count - 1 } ?? false
+        let previousTrackAvailable = nowPlaying != nil
+
+        if hasNextTrack != nextTrackAvailable {
+            hasNextTrack = nextTrackAvailable
+        }
+
+        if hasPreviousTrack != previousTrackAvailable {
+            hasPreviousTrack = previousTrackAvailable
+        }
+
+        updateCommandAvailability()
     }
 
     private func registerItemDidEndObserver(for item: AVPlayerItem?) {
@@ -377,7 +496,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 if self.hasNextTrack {
                     self.playNextTrack()
                 } else {
-                    self.isPlaying = false
+                    self.setIsPlaying(false)
                     self.updatePlaybackState()
                 }
             }
@@ -388,6 +507,219 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         if let itemDidEndObserver {
             NotificationCenter.default.removeObserver(itemDidEndObserver)
             self.itemDidEndObserver = nil
+        }
+    }
+
+    private func installTimeObserver(on player: AVPlayer) {
+        removeTimeObserver()
+
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+
+                let updatedTime = CMTimeGetSeconds(time)
+                if updatedTime.isFinite {
+                    self.setCurrentTime(max(0, updatedTime))
+                }
+
+                if let itemDuration = self.seconds(from: player.currentItem?.duration) {
+                    self.setDuration(itemDuration)
+                }
+
+                self.updatePlaybackState()
+            }
+        }
+    }
+
+    private func removeTimeObserver() {
+        if let timeObserverToken, let player {
+            player.removeTimeObserver(timeObserverToken)
+            self.timeObserverToken = nil
+        }
+    }
+
+    private func observeDuration(for item: AVPlayerItem, track: Track) {
+        playerItemDurationObservation = item.observe(\.duration, options: [.initial, .new]) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.nowPlaying?.id == track.id else { return }
+
+                if let duration = self.seconds(from: item.duration) {
+                    self.setDuration(duration)
+                }
+                self.updatePlaybackState()
+            }
+        }
+    }
+
+    private func setIsPlaying(_ newValue: Bool) {
+        guard isPlaying != newValue else { return }
+        isPlaying = newValue
+    }
+
+    private func setCurrentTime(_ newValue: TimeInterval, threshold: TimeInterval = 0.05) {
+        let normalizedValue = max(0, newValue)
+        guard abs(currentTime - normalizedValue) > threshold else { return }
+        currentTime = normalizedValue
+    }
+
+    private func setDuration(_ newValue: TimeInterval, threshold: TimeInterval = 0.05) {
+        let normalizedValue = max(0, newValue)
+        guard abs(duration - normalizedValue) > threshold else { return }
+        duration = normalizedValue
+    }
+
+    private func loadArtworkForNowPlaying(_ track: Track) {
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
+
+        guard let artworkURL = track.artworkURL else {
+            var info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
+            info.removeValue(forKey: MPMediaItemPropertyArtwork)
+            nowPlayingInfoCenter.nowPlayingInfo = info
+            return
+        }
+
+        if let cachedImage = artworkCache.object(forKey: artworkURL as NSURL) {
+            setNowPlayingArtwork(cachedImage)
+            return
+        }
+
+        artworkLoadTask = Task { [weak self, artworkURL, track] in
+            guard let self else { return }
+
+            do {
+                let (data, _) = try await URLSession.shared.data(from: artworkURL)
+                guard Task.isCancelled == false else { return }
+                guard let image = UIImage(data: data) else { return }
+
+                self.artworkCache.setObject(image, forKey: artworkURL as NSURL)
+
+                guard self.nowPlaying?.id == track.id else { return }
+                self.setNowPlayingArtwork(image)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func setNowPlayingArtwork(_ image: UIImage) {
+        let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        var info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
+        info[MPMediaItemPropertyArtwork] = artwork
+        nowPlayingInfoCenter.nowPlayingInfo = info
+    }
+
+    private func observeAudioSessionInterruptions() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                self?.handleAudioSessionInterruption(notification)
+            }
+        }
+    }
+
+    private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard
+            let info = notification.userInfo,
+            let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let interruptionType = AVAudioSession.InterruptionType(rawValue: typeValue)
+        else {
+            return
+        }
+
+        switch interruptionType {
+        case .began:
+            pause()
+        case .ended:
+            guard
+                let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt
+            else {
+                return
+            }
+
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            if options.contains(.shouldResume) {
+                resume()
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    private func togglePlayback() {
+        if isPlaying {
+            pause()
+        } else {
+            resume()
+        }
+    }
+
+    private func activateAudioSessionIfNeeded() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to reactivate audio session: \(error)")
+        }
+    }
+
+    private func deactivateAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            print("Failed to deactivate audio session: \(error)")
+        }
+    }
+
+    private func updateCommandAvailability() {
+        commandCenter.nextTrackCommand.isEnabled = hasNextTrack
+        commandCenter.previousTrackCommand.isEnabled = hasPreviousTrack
+        commandCenter.changePlaybackPositionCommand.isEnabled = duration > 0
+    }
+
+    private func cachedStreamCandidates(for track: Track) -> [URL]? {
+        streamCandidateCache[cacheKey(for: track)]
+    }
+
+    private func cacheKey(for track: Track) -> String {
+        track.youtubeVideoID ?? track.id
+    }
+
+    private func resolveAndCacheStreamCandidates(for track: Track) async throws -> [URL] {
+        if let cached = cachedStreamCandidates(for: track), cached.isEmpty == false {
+            return cached
+        }
+
+        let candidates = try await extractPlayableStreamCandidates(for: track)
+        let deduplicated = deduplicatedURLs(candidates)
+        if deduplicated.isEmpty == false {
+            streamCandidateCache[cacheKey(for: track)] = deduplicated
+        }
+        return deduplicated
+    }
+
+    private func prewarmQueue(around track: Track) {
+        guard playbackQueue.isEmpty == false else { return }
+
+        let targetTracks = playbackQueue
+            .filter { matches($0, track) == false }
+            .prefix(3)
+
+        for pendingTrack in targetTracks {
+            guard pendingTrack.youtubeVideoID != nil else { continue }
+
+            let key = cacheKey(for: pendingTrack)
+            guard streamCandidateCache[key] == nil, prefetchTasks[key] == nil else { continue }
+
+            prefetchTasks[key] = Task { [weak self, pendingTrack] in
+                guard let self else { return }
+                defer { self.prefetchTasks.removeValue(forKey: key) }
+                _ = try? await self.resolveAndCacheStreamCandidates(for: pendingTrack)
+            }
         }
     }
 
@@ -465,6 +797,13 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         return urls.filter { url in
             seenURLs.insert(url.absoluteString).inserted
         }
+    }
+
+    private func seconds(from time: CMTime?) -> TimeInterval? {
+        guard let time else { return nil }
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite, seconds > 0 else { return nil }
+        return seconds
     }
 }
 

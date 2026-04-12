@@ -5,20 +5,24 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 28) {
                     header
 
-                    forYouSection
+                    quickPicksSection
 
-                    moreForYouSection
+                    featuredTracksSection
+
+                    recentTracksSection
 
                     mixAlbumsSection
                 }
-                .padding()
-                .padding(.bottom, 90)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, bottomSpacing)
             }
             .navigationTitle("Home")
+            .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: Playlist.self) { playlist in
                 PlaylistDetailView(playlist: playlist)
             }
@@ -32,56 +36,88 @@ struct HomeView: View {
                     await appState.refreshDashboard()
                 }
             }
+            .background(homeBackground.ignoresSafeArea())
         }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Discover")
-                .font(.largeTitle.bold())
-            Text("Songs picked from the music you already like.")
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+
+            Text("A denser home feed built from your likes, mixes, and recently played songs.")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Button {
-                Task {
-                    await appState.refreshHome()
+                .foregroundStyle(Color.white.opacity(0.68))
+
+            HStack(spacing: 12) {
+                Button {
+                    Task {
+                        await appState.refreshHome()
+                    }
+                } label: {
+                    Label("Shuffle Picks", systemImage: "shuffle")
                 }
-            } label: {
-                Label("Shuffle Picks", systemImage: "shuffle")
+                .buttonStyle(.borderedProminent)
+                .tint(Color(red: 1, green: 0.23, blue: 0.42))
+                .disabled(appState.isLoading)
+
+                if appState.isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .tint(.white)
+                        Text("Refreshing")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Color.white.opacity(0.7))
+                    }
+                }
             }
-            .buttonStyle(.bordered)
-            .disabled(appState.isLoading)
         }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.16, green: 0.05, blue: 0.12),
+                            Color(red: 0.07, green: 0.07, blue: 0.12)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 32, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+                }
+        )
     }
 
     @ViewBuilder
-    private var forYouSection: some View {
+    private var quickPicksSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("For You")
                 .font(.title3.bold())
+                .foregroundStyle(.white)
 
             if appState.featuredTracks.isEmpty {
                 if appState.isLoading {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading music from your account...")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                    infoCard("Loading music from your account...")
                 } else {
-                    Text(
+                    infoCard(
                         appState.homeStatusMessage ??
                             (appState.isUsingLocalLibraryFallback
                                 ? "Search and play a few songs and we’ll turn that into your For You picks."
                                 : "We couldn't build your recommendations yet. Pull to refresh after your library finishes loading.")
                     )
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
                 }
             } else {
-                ForEach(appState.featuredTracks) { track in
-                    TrackRowView(track: track) {
-                        appState.play(track: track, queue: appState.featuredTracks)
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
+                    ForEach(Array(appState.featuredTracks.prefix(6))) { track in
+                        CompactTrackCard(track: track) {
+                            appState.play(track: track, queue: homePlaybackQueue)
+                        }
                     }
                 }
             }
@@ -89,15 +125,35 @@ struct HomeView: View {
     }
 
     @ViewBuilder
-    private var moreForYouSection: some View {
+    private var featuredTracksSection: some View {
+        let expandedFeaturedTracks = Array(appState.featuredTracks.dropFirst(6).prefix(10))
+
+        if expandedFeaturedTracks.isEmpty == false {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("More Songs")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+
+                ForEach(expandedFeaturedTracks) { track in
+                    TrackRowView(track: track) {
+                        appState.play(track: track, queue: homePlaybackQueue)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var recentTracksSection: some View {
         if appState.recentTracks.isEmpty == false {
             VStack(alignment: .leading, spacing: 8) {
-                Text("More For You")
+                Text("From Your Library")
                     .font(.title3.bold())
+                    .foregroundStyle(.white)
 
-                ForEach(appState.recentTracks) { track in
+                ForEach(Array(appState.recentTracks.prefix(12))) { track in
                     TrackRowView(track: track) {
-                        appState.play(track: track, queue: appState.recentTracks)
+                        appState.play(track: track, queue: homePlaybackQueue)
                     }
                 }
             }
@@ -109,24 +165,18 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Suggested Mixes")
                 .font(.title3.bold())
+                .foregroundStyle(.white)
 
             if appState.suggestedMixes.isEmpty {
                 if appState.isLoadingPlaylists {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Building suggested mixes...")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                    infoCard("Building suggested mixes...")
                 } else {
-                    Text(
+                    infoCard(
                         appState.libraryStatusMessage ??
                             (appState.isUsingLocalLibraryFallback
                                 ? "Replay Mix and Favorites Mix will show up here as you use the app."
                                 : "We’ll pull suggested mixes from your playlists once your library finishes loading.")
                     )
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
                 }
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -143,6 +193,50 @@ struct HomeView: View {
             }
         }
     }
+
+    private var bottomSpacing: CGFloat {
+        appState.nowPlaying == nil ? 108 : 174
+    }
+
+    private var homeBackground: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black,
+                    Color(red: 0.03, green: 0.03, blue: 0.06)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Circle()
+                .fill(Color(red: 0.94, green: 0.18, blue: 0.35).opacity(0.16))
+                .frame(width: 260, height: 260)
+                .blur(radius: 80)
+                .offset(x: 140, y: -220)
+        }
+    }
+
+    private var homePlaybackQueue: [Track] {
+        let combined = appState.featuredTracks + appState.recentTracks
+        var seenIDs: Set<String> = []
+        return combined.filter { track in
+            let identifier = track.youtubeVideoID ?? track.id
+            return seenIDs.insert(identifier).inserted
+        }
+    }
+
+    private func infoCard(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(Color.white.opacity(0.72))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(Color.white.opacity(0.07))
+            )
+    }
 }
 
 private struct MixAlbumCard: View {
@@ -155,15 +249,28 @@ private struct MixAlbumCard: View {
 
             Text(playlist.title)
                 .font(.headline)
-                .foregroundStyle(.primary)
+                .foregroundStyle(.white)
                 .lineLimit(2)
 
             Text(detailText)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.62))
                 .lineLimit(1)
         }
         .frame(width: 164, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(Color.white.opacity(0.03))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                }
+        )
     }
 
     private var detailText: String {
@@ -175,5 +282,44 @@ private struct MixAlbumCard: View {
         case .standard:
             return playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks"
         }
+    }
+}
+
+private struct CompactTrackCard: View {
+    let track: Track
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                AsyncArtworkView(url: track.artworkURL, cornerRadius: 20)
+                    .frame(height: 152)
+
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Text(track.artist)
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(1)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .fill(Color.white.opacity(0.03))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    }
+            )
+        }
+        .buttonStyle(.plain)
     }
 }

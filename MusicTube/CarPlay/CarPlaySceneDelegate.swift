@@ -18,22 +18,6 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         disconnect()
     }
 
-    func templateApplicationScene(
-        _ templateApplicationScene: CPTemplateApplicationScene,
-        didConnect interfaceController: CPInterfaceController,
-        to window: CPWindow
-    ) {
-        connect(interfaceController: interfaceController)
-    }
-
-    func templateApplicationScene(
-        _ templateApplicationScene: CPTemplateApplicationScene,
-        didDisconnect interfaceController: CPInterfaceController,
-        from window: CPWindow
-    ) {
-        disconnect()
-    }
-
     private func connect(interfaceController: CPInterfaceController) {
         manager.attach(interfaceController: interfaceController)
         AppContainer.shared.carPlayManager = manager

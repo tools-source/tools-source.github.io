@@ -34,7 +34,9 @@ final class CarPlayManager: NSObject {
         installRootTemplateIfNeeded()
 
         homeTemplate?.updateSections(homeSections(using: appState))
+        homeTemplate?.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
         libraryTemplate?.updateSections(librarySections(using: appState))
+        libraryTemplate?.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
     }
 
     private func installRootTemplateIfNeeded() {
@@ -49,7 +51,7 @@ final class CarPlayManager: NSObject {
         )
         homeTemplate.tabTitle = "Home"
         homeTemplate.tabImage = UIImage(systemName: "house.fill")
-        homeTemplate.trailingNavigationBarButtons = [makeSearchBarButton()]
+        homeTemplate.trailingNavigationBarButtons = trailingNavigationButtons(using: currentAppState)
 
         let searchTemplate = CPSearchTemplate()
         searchTemplate.delegate = self
@@ -60,7 +62,7 @@ final class CarPlayManager: NSObject {
         )
         libraryTemplate.tabTitle = "Library"
         libraryTemplate.tabImage = UIImage(systemName: "music.note.list")
-        libraryTemplate.trailingNavigationBarButtons = [makeSearchBarButton()]
+        libraryTemplate.trailingNavigationBarButtons = trailingNavigationButtons(using: currentAppState)
 
         let tabBarTemplate = CPTabBarTemplate(templates: [
             homeTemplate,
@@ -162,8 +164,26 @@ final class CarPlayManager: NSObject {
             likedSongsItems = [messageItem(title: "No liked songs found yet")]
         }
 
+        let mixPlaylists = appState.suggestedMixes.isEmpty
+            ? appState.libraryPlaylists.filter { $0.title.localizedCaseInsensitiveContains("mix") }
+            : appState.suggestedMixes
+        let mixPlaylistIDs = Set(mixPlaylists.map(\.id))
+        let standardPlaylistCollections = appState.libraryPlaylists.filter { mixPlaylistIDs.contains($0.id) == false }
+
+        let mixItems: [CPListItem]
+        if mixPlaylists.isEmpty {
+            mixItems = [
+                messageItem(
+                    title: "No mixes yet",
+                    detailText: "Replay Mix and your suggested mixes will show up here."
+                )
+            ]
+        } else {
+            mixItems = mixPlaylists.map { playlistItem(for: $0, appState: appState) }
+        }
+
         let playlistItems: [CPListItem]
-        if appState.libraryPlaylists.isEmpty {
+        if standardPlaylistCollections.isEmpty {
             playlistItems = [
                 messageItem(
                     title: "No playlists found",
@@ -171,10 +191,11 @@ final class CarPlayManager: NSObject {
                 )
             ]
         } else {
-            playlistItems = appState.libraryPlaylists.map { playlistItem(for: $0, appState: appState) }
+            playlistItems = standardPlaylistCollections.map { playlistItem(for: $0, appState: appState) }
         }
 
         sections.append(section(header: "Liked Songs", items: likedSongsItems))
+        sections.append(section(header: "Mixes", items: mixItems))
         sections.append(section(header: "Playlists", items: playlistItems))
         return sections
     }
@@ -191,9 +212,32 @@ final class CarPlayManager: NSObject {
         return searchButton
     }
 
+    private func makeNowPlayingBarButton() -> CPBarButton {
+        let nowPlayingButton = CPBarButton(image: UIImage(systemName: "play.circle.fill") ?? UIImage()) { [weak self] _ in
+            self?.showNowPlaying()
+        }
+        nowPlayingButton.buttonStyle = .rounded
+        return nowPlayingButton
+    }
+
+    private func trailingNavigationButtons(using appState: AppState?) -> [CPBarButton] {
+        var buttons = [makeSearchBarButton()]
+
+        if appState?.nowPlaying != nil {
+            buttons.insert(makeNowPlayingBarButton(), at: 0)
+        }
+
+        return buttons
+    }
+
     private func showSearch() {
         guard let interfaceController, let searchTemplate else { return }
         interfaceController.pushTemplate(searchTemplate, animated: true, completion: nil)
+    }
+
+    private func showNowPlaying() {
+        guard interfaceController != nil else { return }
+        interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
     }
 
     private func trackItem(for track: Track, queue: [Track], appState: AppState) -> CPListItem {
@@ -235,7 +279,7 @@ final class CarPlayManager: NSObject {
             title: playlist.title,
             sections: [section(header: "Tracks", items: [messageItem(title: "Loading playlist tracks...")])]
         )
-        template.trailingNavigationBarButtons = [makeSearchBarButton()]
+        template.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
 
         interfaceController.pushTemplate(template, animated: true, completion: nil)
 

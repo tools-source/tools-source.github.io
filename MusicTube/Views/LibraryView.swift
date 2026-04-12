@@ -5,80 +5,30 @@ struct LibraryView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Account") {
-                    if let user = appState.user {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(user.name)
-                                .font(.headline)
-                            Text(user.email)
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    accountSection
+
+                    if let libraryStatusMessage = appState.libraryStatusMessage,
+                       appState.playlists.isEmpty,
+                       appState.isLoadingPlaylists == false {
+                        librarySection("Library Status") {
+                            Text(libraryStatusMessage)
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.white.opacity(0.72))
                         }
                     }
 
-                    Button("Sign out", role: .destructive) {
-                        Task {
-                            await appState.signOut()
-                        }
-                    }
+                    likedSongsSection
+
+                    playlistsSection
                 }
-
-                if let libraryStatusMessage = appState.libraryStatusMessage,
-                   appState.playlists.isEmpty,
-                   appState.isLoadingPlaylists == false {
-                    Section("Library Status") {
-                        Text(libraryStatusMessage)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if appState.isLoadingPlaylists && appState.playlists.isEmpty {
-                    Section("Library") {
-                        HStack {
-                            ProgressView()
-                            Text("Importing collections...")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    Section("Liked Songs") {
-                        if let likedSongs = appState.likedSongsPlaylist {
-                            NavigationLink(value: likedSongs) {
-                                PlaylistRow(playlist: likedSongs)
-                            }
-                        } else {
-                            Text(
-                                appState.isUsingLocalLibraryFallback
-                                    ? "Tap the heart on a song to save it here."
-                                    : (appState.libraryStatusMessage ?? "No liked songs were found for this account yet.")
-                            )
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Section("Playlists") {
-                        if appState.libraryPlaylists.isEmpty {
-                            Text(
-                                appState.isUsingLocalLibraryFallback
-                                    ? "Search and play songs to start building Replay Mix and Favorites Mix."
-                                    : (appState.libraryStatusMessage ?? "No playlists found for this account yet.")
-                            )
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(appState.libraryPlaylists) { playlist in
-                                NavigationLink(value: playlist) {
-                                    PlaylistRow(playlist: playlist)
-                                }
-                            }
-                        }
-                    }
-                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, bottomSpacing)
             }
             .navigationTitle("Library")
+            .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: Playlist.self) { playlist in
                 PlaylistDetailView(playlist: playlist)
             }
@@ -90,6 +40,134 @@ struct LibraryView: View {
                     await appState.refreshLibrary()
                 }
             }
+            .background(libraryBackground.ignoresSafeArea())
+        }
+    }
+
+    private var likedSongsEmptyStateMessage: String {
+        if appState.isUsingLocalLibraryFallback {
+            if let libraryStatusMessage = appState.libraryStatusMessage,
+               libraryStatusMessage.isEmpty == false {
+                return "\(libraryStatusMessage)\nTap the heart on a song to save it here."
+            }
+
+            return "Tap the heart on a song to save it here."
+        }
+
+        return appState.libraryStatusMessage ?? "No liked songs were found for this account yet."
+    }
+
+    private var bottomSpacing: CGFloat {
+        appState.nowPlaying == nil ? 108 : 174
+    }
+
+    private var libraryBackground: some View {
+        LinearGradient(
+            colors: [
+                Color.black,
+                Color(red: 0.03, green: 0.03, blue: 0.05)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    private var accountSection: some View {
+        librarySection("Account") {
+            VStack(alignment: .leading, spacing: 16) {
+                if let user = appState.user {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(user.name)
+                            .font(.headline)
+                            .foregroundStyle(.white)
+
+                        Text(user.email)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.white.opacity(0.6))
+                    }
+                }
+
+                Divider()
+                    .overlay(Color.white.opacity(0.08))
+
+                Button("Sign out", role: .destructive) {
+                    Task {
+                        await appState.signOut()
+                    }
+                }
+                .font(.headline)
+            }
+        }
+    }
+
+    private var likedSongsSection: some View {
+        librarySection("Liked Songs") {
+            if appState.isLoadingPlaylists && appState.playlists.isEmpty {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("Importing liked songs and playlists...")
+                        .foregroundStyle(Color.white.opacity(0.72))
+                }
+            } else if let likedSongs = appState.likedSongsPlaylist {
+                NavigationLink(value: likedSongs) {
+                    PlaylistRow(playlist: likedSongs)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(likedSongsEmptyStateMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.65))
+            }
+        }
+    }
+
+    private var playlistsSection: some View {
+        librarySection("Playlists") {
+            if appState.libraryPlaylists.isEmpty {
+                Text(
+                    appState.isUsingLocalLibraryFallback
+                        ? "Search and play more songs to keep building Replay Mix and Favorites Mix."
+                        : (appState.libraryStatusMessage ?? "No playlists found for this account yet.")
+                )
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.65))
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(appState.libraryPlaylists) { playlist in
+                        NavigationLink(value: playlist) {
+                            PlaylistRow(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func librarySection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.title3.bold())
+                .foregroundStyle(.white)
+
+            VStack(alignment: .leading, spacing: 12) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .fill(Color.white.opacity(0.03))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    }
+            )
         }
     }
 }
@@ -99,18 +177,25 @@ private struct PlaylistRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 10)
-                .frame(width: 56, height: 56)
+            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 16)
+                .frame(width: 64, height: 64)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(playlist.title)
-                    .font(.headline)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
                     .lineLimit(2)
 
                 Text(itemCountLabel)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.6))
             }
+
+            Spacer(minLength: 10)
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(Color.white.opacity(0.35))
         }
         .padding(.vertical, 4)
     }
@@ -135,25 +220,51 @@ struct PlaylistDetailView: View {
     @State private var isLoading = true
 
     var body: some View {
-        List {
-            if isLoading {
-                HStack {
-                    ProgressView()
-                    Text("Loading playlist tracks...")
-                        .foregroundStyle(.secondary)
-                }
-            } else if tracks.isEmpty {
-                Text("This collection does not have playable YouTube items yet.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(tracks) { track in
-                    TrackRowView(track: track) {
-                        appState.play(track: track, queue: tracks)
+        ScrollView(showsIndicators: false) {
+            LazyVStack(spacing: 14) {
+                if isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .tint(.white)
+                        Text("Loading playlist tracks...")
+                            .foregroundStyle(Color.white.opacity(0.72))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.white.opacity(0.07))
+                    )
+                } else if tracks.isEmpty {
+                    Text("This collection does not have playable YouTube items yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
+                        )
+                } else {
+                    ForEach(tracks) { track in
+                        TrackRowView(track: track) {
+                            appState.play(track: track, queue: tracks)
+                        }
                     }
                 }
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, appState.nowPlaying == nil ? 108 : 174)
         }
+        .background(
+            LinearGradient(
+                colors: [Color.black, Color(red: 0.03, green: 0.03, blue: 0.05)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        )
         .navigationTitle(playlist.title)
         .task {
             guard tracks.isEmpty else { return }

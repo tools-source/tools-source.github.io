@@ -17,7 +17,10 @@ protocol MusicCatalogProviding {
 protocol PlaybackControlling: AnyObject {
     var nowPlaying: Track? { get }
     var isPlaying: Bool { get }
+    var currentTime: TimeInterval { get }
+    var duration: TimeInterval { get }
     func play(track: Track)
     func resume()
     func pause()
+    func seek(to time: TimeInterval)
 }

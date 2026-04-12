@@ -197,14 +197,14 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
 
         let playlistSources = prioritizedLibraryPlaylists(systemCollections + userPlaylists)
-        let mixAlbums = selectSuggestedMixes(from: playlistSources, limit: 6)
+        let mixAlbums = selectSuggestedMixes(from: playlistSources, limit: 8)
         let tracksByPlaylist = await fetchTracks(
             for: mixAlbums,
             accessToken: accessToken,
-            maxItemsPerPlaylist: 24
+            maxItemsPerPlaylist: 36
         )
 
-        let mixTracks = mixAlbums.flatMap { randomizedTracks(from: tracksByPlaylist[$0.id] ?? [], limit: 12) }
+        let mixTracks = mixAlbums.flatMap { randomizedTracks(from: tracksByPlaylist[$0.id] ?? [], limit: 16) }
         let seedTracks = deduplicatedTracks(likedTracks + mixTracks)
 
         guard seedTracks.isEmpty == false else {
@@ -228,12 +228,12 @@ final class YouTubeAPIService: MusicCatalogProviding {
         let featuredPool = deduplicatedTracks(
             personalizedTracks.shuffled() + likedTracks.shuffled() + mixTracks.shuffled()
         )
-        let featured = Array(featuredPool.prefix(25))
+        let featured = Array(featuredPool.prefix(36))
         let featuredIDs = Set(featured.map(trackIdentifier))
         let recent = Array(
             deduplicatedTracks(mixTracks.shuffled() + personalizedTracks.shuffled() + likedTracks.shuffled())
                 .filter { featuredIDs.contains(trackIdentifier($0)) == false }
-                .prefix(25)
+                .prefix(30)
         )
 
         if featured.isEmpty, recent.isEmpty, let loadError = loadErrors.first {
@@ -715,7 +715,14 @@ final class YouTubeAPIService: MusicCatalogProviding {
         do {
             return try await fetchLikedMusicTracksByRating(accessToken: accessToken, maxItems: maxItems)
         } catch {
-            guard let likesPlaylistID = relatedPlaylists?.likes else {
+            let effectiveRelatedPlaylists: RelatedPlaylists?
+            if let relatedPlaylists {
+                effectiveRelatedPlaylists = relatedPlaylists
+            } else {
+                effectiveRelatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
+            }
+
+            guard let likesPlaylistID = effectiveRelatedPlaylists?.likes else {
                 throw error
             }
 
@@ -747,6 +754,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         var tracks: [Track] = []
         var nextPageToken: String?
         var requiresMusicFiltering = false
+        let rawTrackLimit = max(maxItems * 3, 150)
 
         repeat {
             var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/videos")!
@@ -778,15 +786,16 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
             tracks.append(contentsOf: pageTracks)
             nextPageToken = response.nextPageToken
-        } while nextPageToken != nil && tracks.count < maxItems
+        } while nextPageToken != nil && tracks.count < rawTrackLimit
 
-        let dedupedTracks = Array(deduplicatedTracks(tracks).prefix(maxItems))
+        let dedupedTracks = deduplicatedTracks(tracks)
 
         if requiresMusicFiltering {
-            return (try? await filterMusicTracks(dedupedTracks, accessToken: accessToken)) ?? dedupedTracks
+            let filteredTracks = (try? await filterMusicTracks(dedupedTracks, accessToken: accessToken)) ?? dedupedTracks
+            return Array(filteredTracks.prefix(maxItems))
         }
 
-        return dedupedTracks
+        return Array(dedupedTracks.prefix(maxItems))
     }
 
     private func fetchTracks(
