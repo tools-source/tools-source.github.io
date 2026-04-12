@@ -8,6 +8,7 @@ final class CarPlayManager: NSObject {
 
     private var homeTemplate: CPListTemplate?
     private var libraryTemplate: CPListTemplate?
+    private var downloadsTemplate: CPListTemplate?
     private var searchTemplate: CPSearchTemplate?
     private var tabBarTemplate: CPTabBarTemplate?
     private var searchResultsByIdentifier: [String: Track] = [:]
@@ -23,6 +24,7 @@ final class CarPlayManager: NSObject {
         interfaceController = nil
         homeTemplate = nil
         libraryTemplate = nil
+        downloadsTemplate = nil
         searchTemplate = nil
         tabBarTemplate = nil
         searchResultsByIdentifier = [:]
@@ -33,10 +35,13 @@ final class CarPlayManager: NSObject {
         self.appState = appState
         installRootTemplateIfNeeded()
 
+        let trailingButtons = trailingNavigationButtons(using: appState)
         homeTemplate?.updateSections(homeSections(using: appState))
-        homeTemplate?.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
+        homeTemplate?.trailingNavigationBarButtons = trailingButtons
         libraryTemplate?.updateSections(librarySections(using: appState))
-        libraryTemplate?.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
+        libraryTemplate?.trailingNavigationBarButtons = trailingButtons
+        downloadsTemplate?.updateSections(downloadsSections())
+        downloadsTemplate?.trailingNavigationBarButtons = trailingButtons
     }
 
     private func installRootTemplateIfNeeded() {
@@ -64,14 +69,24 @@ final class CarPlayManager: NSObject {
         libraryTemplate.tabImage = UIImage(systemName: "music.note.list")
         libraryTemplate.trailingNavigationBarButtons = trailingNavigationButtons(using: currentAppState)
 
+        let downloadsTemplate = CPListTemplate(
+            title: "Downloads",
+            sections: downloadsSections()
+        )
+        downloadsTemplate.tabTitle = "Downloads"
+        downloadsTemplate.tabImage = UIImage(systemName: "arrow.down.circle.fill")
+        downloadsTemplate.trailingNavigationBarButtons = trailingNavigationButtons(using: currentAppState)
+
         let tabBarTemplate = CPTabBarTemplate(templates: [
             homeTemplate,
+            downloadsTemplate,
             libraryTemplate
         ])
 
         self.homeTemplate = homeTemplate
         self.searchTemplate = searchTemplate
         self.libraryTemplate = libraryTemplate
+        self.downloadsTemplate = downloadsTemplate
         self.tabBarTemplate = tabBarTemplate
 
         interfaceController.setRootTemplate(tabBarTemplate, animated: true, completion: nil)
@@ -198,6 +213,28 @@ final class CarPlayManager: NSObject {
         sections.append(section(header: "Mixes", items: mixItems))
         sections.append(section(header: "Playlists", items: playlistItems))
         return sections
+    }
+
+    private func downloadsSections() -> [CPListSection] {
+        let downloads = DownloadService.shared.downloads
+        guard downloads.isEmpty == false else {
+            return [
+                section(
+                    header: "Downloads",
+                    items: [
+                        messageItem(
+                            title: "No downloaded tracks",
+                            detailText: "Download songs on your iPhone to play offline."
+                        )
+                    ]
+                )
+            ]
+        }
+
+        let appState = self.appState ?? AppContainer.shared.appState
+        let tracks = downloads.reversed().map(\.localTrack)
+        let items = tracks.map { trackItem(for: $0, queue: tracks, appState: appState) }
+        return [section(header: "Downloaded", items: items)]
     }
 
     private func section(header: String, items: [CPListItem]) -> CPListSection {

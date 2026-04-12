@@ -5,6 +5,10 @@ import UIKit
 
 @MainActor
 final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
+    enum RepeatMode: String, CaseIterable {
+        case off, one, all
+    }
+
     @Published private(set) var nowPlaying: Track?
     @Published private(set) var isPlaying = false
     @Published private(set) var isResolvingStream = false
@@ -13,6 +17,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     @Published private(set) var hasPreviousTrack = false
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
+    @Published var shuffleMode: Bool = false
+    @Published var repeatMode: RepeatMode = .off
+
+    private var originalQueue: [Track] = []
 
     private var player: AVPlayer?
     private var activeStreamURL: URL?
@@ -86,6 +94,51 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         player?.seek(to: .zero)
         updatePlaybackState()
+    }
+
+    func toggleShuffle() {
+        shuffleMode.toggle()
+        guard playbackQueue.isEmpty == false else { return }
+
+        if shuffleMode {
+            // Save original, shuffle remaining (keep current track at index)
+            originalQueue = playbackQueue
+            if let currentIndex = playbackQueueIndex {
+                let current = playbackQueue[currentIndex]
+                var rest = playbackQueue
+                rest.remove(at: currentIndex)
+                rest.shuffle()
+                playbackQueue = [current] + rest
+                playbackQueueIndex = 0
+            } else {
+                playbackQueue.shuffle()
+            }
+        } else {
+            // Restore original order, keep position on current track
+            if originalQueue.isEmpty == false {
+                let current = nowPlaying
+                playbackQueue = originalQueue
+                if let current, let idx = playbackQueue.firstIndex(where: { matches($0, current) }) {
+                    playbackQueueIndex = idx
+                }
+                originalQueue = []
+            }
+        }
+        updateQueueState()
+    }
+
+    func cycleRepeatMode() {
+        switch repeatMode {
+        case .off: repeatMode = .all
+        case .all: repeatMode = .one
+        case .one: repeatMode = .off
+        }
+    }
+
+    /// Resolves the best audio stream URL for a track (used by DownloadService).
+    func resolveStreamURL(for track: Track) async throws -> URL? {
+        let candidates = try await resolveAndCacheStreamCandidates(for: track)
+        return candidates.first
     }
 
     func stop() {
@@ -434,7 +487,19 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     private func configureQueue(for track: Track, queue: [Track]?) {
-        let normalizedQueue = normalizeQueue(queue ?? [track], selectedTrack: track)
+        var normalizedQueue = normalizeQueue(queue ?? [track], selectedTrack: track)
+        originalQueue = normalizedQueue
+
+        if shuffleMode {
+            if let idx = normalizedQueue.firstIndex(where: { matches($0, track) }) {
+                normalizedQueue.remove(at: idx)
+                normalizedQueue.shuffle()
+                normalizedQueue.insert(track, at: 0)
+            } else {
+                normalizedQueue.shuffle()
+            }
+        }
+
         playbackQueue = normalizedQueue
         playbackQueueIndex = normalizedQueue.firstIndex(where: { matches($0, track) }) ?? 0
         updateQueueState()
@@ -493,11 +558,29 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             Task { @MainActor [weak self] in
                 guard let self else { return }
 
-                if self.hasNextTrack {
-                    self.playNextTrack()
-                } else {
-                    self.setIsPlaying(false)
+                switch self.repeatMode {
+                case .one:
+                    self.player?.seek(to: .zero)
+                    self.player?.play()
+                    self.setIsPlaying(true)
+                    self.setCurrentTime(0, threshold: 0)
                     self.updatePlaybackState()
+                case .all:
+                    if self.hasNextTrack {
+                        self.playNextTrack()
+                    } else if self.playbackQueue.isEmpty == false {
+                        // Wrap around to first track
+                        self.playbackQueueIndex = 0
+                        self.updateQueueState()
+                        self.startPlayback(for: self.playbackQueue[0])
+                    }
+                case .off:
+                    if self.hasNextTrack {
+                        self.playNextTrack()
+                    } else {
+                        self.setIsPlaying(false)
+                        self.updatePlaybackState()
+                    }
                 }
             }
         }

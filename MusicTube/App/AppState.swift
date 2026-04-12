@@ -35,8 +35,14 @@ final class AppState: ObservableObject {
     @Published private(set) var hasPreviousTrack: Bool = false
     @Published private(set) var hasLoadedHome = false
     @Published private(set) var hasLoadedLibrary = false
+    @Published var shuffleMode: Bool = false
+    @Published var repeatMode: PlaybackService.RepeatMode = .off
+    @Published private(set) var sleepTimerEndDate: Date?
+    @Published private(set) var isDownloadingNowPlaying: Bool = false
 
     private var session: YouTubeSession?
+    private var sleepTimerTask: Task<Void, Never>?
+    let downloadService = DownloadService.shared
     private let authService: AuthProviding
     private let catalogService: MusicCatalogProviding
     private let playbackService: PlaybackService
@@ -132,6 +138,18 @@ final class AppState: ObservableObject {
                 return min(max(currentTime / duration, 0), 1)
             }
             .assign(to: \.playbackProgress, on: self)
+            .store(in: &cancellables)
+
+        playbackService.$shuffleMode
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .assign(to: \.shuffleMode, on: self)
+            .store(in: &cancellables)
+
+        playbackService.$repeatMode
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .assign(to: \.repeatMode, on: self)
             .store(in: &cancellables)
 
         Task {
@@ -434,6 +452,60 @@ final class AppState: ObservableObject {
 
     func dismissPlayer() {
         isPlayerPresented = false
+    }
+
+    // MARK: Shuffle / Repeat
+
+    func toggleShuffle() {
+        playbackService.toggleShuffle()
+    }
+
+    func cycleRepeatMode() {
+        playbackService.cycleRepeatMode()
+    }
+
+    // MARK: Sleep Timer
+
+    func setSleepTimer(minutes: Int) {
+        sleepTimerTask?.cancel()
+        sleepTimerEndDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        sleepTimerTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60_000_000_000)
+            guard Task.isCancelled == false else { return }
+            await MainActor.run { [weak self] in
+                self?.pause()
+                self?.sleepTimerEndDate = nil
+            }
+        }
+    }
+
+    func cancelSleepTimer() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerEndDate = nil
+    }
+
+    // MARK: Download
+
+    func downloadNowPlaying() {
+        guard let track = nowPlaying else { return }
+        downloadTrack(track)
+    }
+
+    func downloadTrack(_ track: Track) {
+        guard !downloadService.isDownloaded(track), !downloadService.isDownloading(track) else { return }
+
+        isDownloadingNowPlaying = true
+        Task {
+            defer { Task { @MainActor in self.isDownloadingNowPlaying = false } }
+            do {
+                if let streamURL = try await playbackService.resolveStreamURL(for: track) {
+                    downloadService.startDownload(track: track, streamURL: streamURL)
+                }
+            } catch {
+                print("[AppState] Failed to resolve stream for download: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func restoreSession() async {
