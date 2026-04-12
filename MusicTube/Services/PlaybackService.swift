@@ -176,6 +176,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         prefetchTasks.values.forEach { $0.cancel() }
         prefetchTasks = [:]
         nowPlayingInfoCenter.nowPlayingInfo = nil
+        nowPlayingInfoCenter.playbackState = .stopped
         deactivateAudioSession()
         updateQueueState()
     }
@@ -241,11 +242,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         if let player {
             activateAudioSessionIfNeeded()
             player.play()
-
-            if player.rate != 0 {
-                setIsPlaying(true)
-                updatePlaybackState()
-            }
+            setIsPlaying(true)
+            updatePlaybackState()
             return
         }
 
@@ -377,6 +375,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
 
         nowPlayingInfoCenter.nowPlayingInfo = info
+        nowPlayingInfoCenter.playbackState = currentNowPlayingPlaybackState()
         loadArtworkForNowPlaying(track)
     }
 
@@ -394,6 +393,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
 
         nowPlayingInfoCenter.nowPlayingInfo = info
+        nowPlayingInfoCenter.playbackState = currentNowPlayingPlaybackState()
         updateCommandAvailability()
         updateQueueState()
     }
@@ -471,7 +471,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.setIsPlaying(player.timeControlStatus == .playing)
+                self.setIsPlaying(self.shouldPresentAsPlaying(player))
                 if player.timeControlStatus == .playing {
                     self.playbackStartupTask?.cancel()
                     self.playbackStartupTask = nil
@@ -482,7 +482,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         updateNowPlayingInfo(for: track)
         player.play()
-        setIsPlaying(false)
+        setIsPlaying(true)
         updatePlaybackState()
 
         playbackStartupTask = Task { [weak self, weak player] in
@@ -669,6 +669,22 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         let normalizedValue = max(0, newValue)
         guard abs(duration - normalizedValue) > threshold else { return }
         duration = normalizedValue
+    }
+
+    private func shouldPresentAsPlaying(_ player: AVPlayer) -> Bool {
+        switch player.timeControlStatus {
+        case .paused:
+            return false
+        case .playing, .waitingToPlayAtSpecifiedRate:
+            return true
+        @unknown default:
+            return player.rate != 0
+        }
+    }
+
+    private func currentNowPlayingPlaybackState() -> MPNowPlayingPlaybackState {
+        guard nowPlaying != nil else { return .stopped }
+        return isPlaying ? .playing : .paused
     }
 
     private func loadArtworkForNowPlaying(_ track: Track) {

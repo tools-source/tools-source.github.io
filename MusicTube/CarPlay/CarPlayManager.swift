@@ -3,16 +3,21 @@ import UIKit
 
 @MainActor
 final class CarPlayManager: NSObject {
+    private struct ArtworkPalette {
+        let start: UIColor
+        let end: UIColor
+        let accent: UIColor
+    }
+
     private weak var interfaceController: CPInterfaceController?
     private weak var appState: AppState?
 
     private var homeTemplate: CPListTemplate?
     private var libraryTemplate: CPListTemplate?
     private var downloadsTemplate: CPListTemplate?
-    private var searchTemplate: CPSearchTemplate?
     private var tabBarTemplate: CPTabBarTemplate?
-    private var searchResultsByIdentifier: [String: Track] = [:]
-    private var currentSearchResults: [Track] = []
+    private let artworkCache = NSCache<NSURL, UIImage>()
+    private let placeholderCache = NSCache<NSString, UIImage>()
 
     func attach(interfaceController: CPInterfaceController) {
         self.interfaceController = interfaceController
@@ -25,15 +30,15 @@ final class CarPlayManager: NSObject {
         homeTemplate = nil
         libraryTemplate = nil
         downloadsTemplate = nil
-        searchTemplate = nil
         tabBarTemplate = nil
-        searchResultsByIdentifier = [:]
-        currentSearchResults = []
+        artworkCache.removeAllObjects()
+        placeholderCache.removeAllObjects()
     }
 
     func refresh(using appState: AppState) {
         self.appState = appState
         installRootTemplateIfNeeded()
+        configureNowPlayingTemplate(using: appState)
 
         let trailingButtons = trailingNavigationButtons(using: appState)
         homeTemplate?.updateSections(homeSections(using: appState))
@@ -58,9 +63,6 @@ final class CarPlayManager: NSObject {
         homeTemplate.tabImage = UIImage(systemName: "house.fill")
         homeTemplate.trailingNavigationBarButtons = trailingNavigationButtons(using: currentAppState)
 
-        let searchTemplate = CPSearchTemplate()
-        searchTemplate.delegate = self
-
         let libraryTemplate = CPListTemplate(
             title: "Library",
             sections: librarySections(using: currentAppState)
@@ -84,11 +86,11 @@ final class CarPlayManager: NSObject {
         ])
 
         self.homeTemplate = homeTemplate
-        self.searchTemplate = searchTemplate
         self.libraryTemplate = libraryTemplate
         self.downloadsTemplate = downloadsTemplate
         self.tabBarTemplate = tabBarTemplate
 
+        configureNowPlayingTemplate(using: currentAppState)
         interfaceController.setRootTemplate(tabBarTemplate, animated: true, completion: nil)
     }
 
@@ -136,8 +138,14 @@ final class CarPlayManager: NSObject {
         }
 
         return [
-            section(header: "For You", items: featuredItems),
-            section(header: "Suggested Mixes", items: mixItems)
+            section(
+                header: "Suggested Mixes",
+                items: mixItems
+            ),
+            section(
+                header: "For You",
+                items: featuredItems
+            )
         ]
     }
 
@@ -157,15 +165,6 @@ final class CarPlayManager: NSObject {
         }
 
         var sections: [CPListSection] = []
-
-        if let user = appState.user {
-            sections.append(
-                section(
-                    header: "Account",
-                    items: [messageItem(title: user.name, detailText: user.email)]
-                )
-            )
-        }
 
         if appState.playlists.isEmpty, appState.isLoadingPlaylists {
             sections.append(section(header: "Library", items: [messageItem(title: "Importing collections...")]))
@@ -245,24 +244,25 @@ final class CarPlayManager: NSObject {
         CPListSection(items: items, header: header, sectionIndexTitle: nil)
     }
 
-    private func makeSearchBarButton() -> CPBarButton {
-        let searchButton = CPBarButton(image: UIImage(systemName: "magnifyingglass") ?? UIImage()) { [weak self] _ in
-            self?.showSearch()
-        }
-        searchButton.buttonStyle = .rounded
-        return searchButton
-    }
-
     private func makeNowPlayingBarButton() -> CPBarButton {
-        let nowPlayingButton = CPBarButton(image: UIImage(systemName: "play.circle.fill") ?? UIImage()) { [weak self] _ in
+        let nowPlayingButton = CPBarButton(image: UIImage(systemName: "waveform.circle.fill") ?? UIImage()) { [weak self] _ in
             self?.showNowPlaying()
         }
         nowPlayingButton.buttonStyle = .rounded
         return nowPlayingButton
     }
 
+    private func makeShuffleBarButton(using appState: AppState?) -> CPBarButton {
+        let shuffleImageName = appState?.shuffleMode == true ? "shuffle.circle.fill" : "shuffle.circle"
+        let shuffleButton = CPBarButton(image: UIImage(systemName: shuffleImageName) ?? UIImage()) { [weak self] _ in
+            self?.toggleShuffle()
+        }
+        shuffleButton.buttonStyle = .rounded
+        return shuffleButton
+    }
+
     private func trailingNavigationButtons(using appState: AppState?) -> [CPBarButton] {
-        var buttons = [makeSearchBarButton()]
+        var buttons = [makeShuffleBarButton(using: appState)]
 
         if appState?.nowPlaying != nil {
             buttons.insert(makeNowPlayingBarButton(), at: 0)
@@ -271,19 +271,15 @@ final class CarPlayManager: NSObject {
         return buttons
     }
 
-    private func showSearch() {
-        guard let interfaceController, let searchTemplate else { return }
-        interfaceController.pushTemplate(searchTemplate, animated: true, completion: nil)
-    }
-
     private func showNowPlaying() {
         guard interfaceController != nil else { return }
+        configureNowPlayingTemplate(using: appState ?? AppContainer.shared.appState)
         interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
     }
 
     private func trackItem(for track: Track, queue: [Track], appState: AppState) -> CPListItem {
         let item = CPListItem(text: track.title, detailText: track.artist)
-        item.userInfo = trackIdentifier(for: track)
+        styleTrackItem(item, track: track, appState: appState)
 
         item.handler = { [weak self] _, completion in
             appState.play(track: track, queue: queue)
@@ -296,12 +292,24 @@ final class CarPlayManager: NSObject {
 
     private func playlistItem(for playlist: Playlist, appState: AppState) -> CPListItem {
         let item = CPListItem(text: playlist.title, detailText: playlistSubtitle(for: playlist))
-        item.accessoryType = .disclosureIndicator
         item.userInfo = playlist.id
+        configureArtwork(
+            for: item,
+            artworkURL: playlist.artworkURL,
+            title: playlist.title,
+            symbolName: playlistSymbolName(for: playlist)
+        )
 
         item.handler = { [weak self] _, completion in
-            self?.showPlaylist(playlist, appState: appState)
-            completion()
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    completion()
+                    return
+                }
+
+                await self.playPlaylist(playlist, appState: appState)
+                completion()
+            }
         }
 
         return item
@@ -310,47 +318,21 @@ final class CarPlayManager: NSObject {
     private func messageItem(title: String, detailText: String? = nil) -> CPListItem {
         let item = CPListItem(text: title, detailText: detailText)
         item.userInfo = nil
+        item.isEnabled = false
         return item
     }
 
-    private func showPlaylist(_ playlist: Playlist, appState: AppState) {
-        guard let interfaceController else { return }
+    private func playPlaylist(_ playlist: Playlist, appState: AppState) async {
+        let tracks = await appState.loadPlaylistItems(for: playlist)
 
-        let template = CPListTemplate(
-            title: playlist.title,
-            sections: [section(header: "Tracks", items: [messageItem(title: "Loading playlist tracks...")])]
-        )
-        template.trailingNavigationBarButtons = trailingNavigationButtons(using: appState)
-
-        interfaceController.pushTemplate(template, animated: true, completion: nil)
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            let tracks = await appState.loadPlaylistItems(for: playlist)
-
-            if tracks.isEmpty {
-                template.updateSections([
-                    section(
-                        header: "Tracks",
-                        items: [
-                            messageItem(
-                                title: "No playable YouTube items yet",
-                                detailText: "This collection is empty or still loading."
-                            )
-                        ]
-                    )
-                ])
-                return
-            }
-
-            template.updateSections([
-                section(
-                    header: "Tracks",
-                    items: tracks.map { self.trackItem(for: $0, queue: tracks, appState: appState) }
-                )
-            ])
+        guard tracks.isEmpty == false else {
+            presentAlert(title: "No playable tracks are available for \(playlist.title).")
+            return
         }
+
+        let selectedTrack = startingTrack(for: tracks, shuffled: appState.shuffleMode)
+        appState.play(track: selectedTrack, queue: tracks)
+        showNowPlaying()
     }
 
     private func playlistSubtitle(for playlist: Playlist) -> String {
@@ -364,63 +346,291 @@ final class CarPlayManager: NSObject {
         }
     }
 
-    private func trackIdentifier(for track: Track) -> String {
-        track.youtubeVideoID ?? track.id
+    private func playlistSymbolName(for playlist: Playlist) -> String {
+        switch playlist.kind {
+        case .likedMusic:
+            return "heart.fill"
+        case .uploads:
+            return "arrow.up.circle.fill"
+        case .standard:
+            return "music.note.list"
+        }
     }
-}
 
-extension CarPlayManager: CPSearchTemplateDelegate {
-    func searchTemplate(
-        _ searchTemplate: CPSearchTemplate,
-        updatedSearchText searchText: String,
-        completionHandler: @escaping ([CPListItem]) -> Void
+    private func styleTrackItem(_ item: CPListItem, track: Track, appState: AppState) {
+        item.userInfo = trackIdentifier(for: track)
+        item.playingIndicatorLocation = .trailing
+
+        let isNowPlaying = appState.nowPlaying.map { trackIdentifier(for: $0) } == trackIdentifier(for: track)
+        item.isPlaying = isNowPlaying
+        item.playbackProgress = isNowPlaying ? CGFloat(min(max(appState.playbackProgress, 0), 1)) : 0
+
+        configureArtwork(
+            for: item,
+            artworkURL: track.artworkURL,
+            title: track.title,
+            symbolName: "music.note"
+        )
+    }
+
+    private func configureArtwork(
+        for item: CPListItem,
+        artworkURL: URL?,
+        title: String,
+        symbolName: String
     ) {
-        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let appState, trimmedSearchText.isEmpty == false else {
-            searchResultsByIdentifier = [:]
-            currentSearchResults = []
-            completionHandler([])
+        let placeholder = decorativeImage(
+            seed: title,
+            symbolName: symbolName,
+            size: listItemImageSize(),
+            cacheKeyPrefix: "row"
+        )
+
+        item.setImage(placeholder)
+
+        guard let artworkURL else { return }
+
+        if let cachedImage = artworkCache.object(forKey: artworkURL as NSURL) {
+            item.setImage(cachedImage)
             return
         }
 
-        Task { @MainActor [weak self] in
-            guard let self else {
-                completionHandler([])
-                return
-            }
+        Task { [weak self, weak item] in
+            guard let self else { return }
+            guard let styledImage = await loadArtworkImage(from: artworkURL) else { return }
+            guard let item else { return }
+            item.setImage(styledImage)
+        }
+    }
 
-            let results = await appState.search(query: trimmedSearchText)
-            currentSearchResults = results
-            searchResultsByIdentifier = Dictionary(
-                uniqueKeysWithValues: results.map { (self.trackIdentifier(for: $0), $0) }
+    private func loadArtworkImage(from url: URL) async -> UIImage? {
+        let cacheKey = url as NSURL
+        if let cached = artworkCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let image = UIImage(data: data) else { return nil }
+            let styledImage = renderArtworkImage(image, targetSize: listItemImageSize())
+            artworkCache.setObject(styledImage, forKey: cacheKey)
+            return styledImage
+        } catch {
+            return nil
+        }
+    }
+
+    private func decorativeImage(
+        seed: String,
+        symbolName: String,
+        size: CGSize,
+        cacheKeyPrefix: String
+    ) -> UIImage {
+        let cacheKey = "\(cacheKeyPrefix)-\(seed)-\(symbolName)-\(Int(size.width))x\(Int(size.height))" as NSString
+        if let cached = placeholderCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        let image = renderDecorativeImage(seed: seed, symbolName: symbolName, size: size)
+        placeholderCache.setObject(image, forKey: cacheKey)
+        return image
+    }
+
+    private func renderDecorativeImage(seed: String, symbolName: String, size: CGSize) -> UIImage {
+        let palette = palette(for: seed)
+        let renderer = UIGraphicsImageRenderer(size: size, format: rendererFormat())
+        let rect = CGRect(origin: .zero, size: size)
+        let cornerRadius = min(size.width, size.height) * 0.28
+
+        return renderer.image { context in
+            let cgContext = context.cgContext
+            let path = UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: cornerRadius)
+
+            cgContext.saveGState()
+            path.addClip()
+            drawGradient(in: rect, palette: palette, context: cgContext)
+
+            cgContext.setFillColor(UIColor.white.withAlphaComponent(0.12).cgColor)
+            cgContext.fillEllipse(in: rect.insetBy(dx: -size.width * 0.2, dy: -size.height * 0.25))
+
+            cgContext.restoreGState()
+
+            UIColor.white.withAlphaComponent(0.18).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+
+            let symbolConfiguration = UIImage.SymbolConfiguration(
+                pointSize: min(size.width, size.height) * 0.44,
+                weight: .semibold
             )
 
-            let items = results.prefix(20).map { track -> CPListItem in
-                let item = CPListItem(text: track.title, detailText: track.artist)
-                item.userInfo = self.trackIdentifier(for: track)
-                return item
-            }
+            let symbol = UIImage(systemName: symbolName, withConfiguration: symbolConfiguration)?
+                .withTintColor(.white, renderingMode: .alwaysOriginal)
 
-            completionHandler(Array(items))
+            if let symbol {
+                let symbolRect = CGRect(
+                    x: (size.width - symbol.size.width) / 2,
+                    y: (size.height - symbol.size.height) / 2,
+                    width: symbol.size.width,
+                    height: symbol.size.height
+                )
+                symbol.draw(in: symbolRect)
+            }
         }
     }
 
-    func searchTemplate(
-        _ searchTemplate: CPSearchTemplate,
-        selectedResult item: CPListItem,
-        completionHandler: @escaping () -> Void
-    ) {
-        defer { completionHandler() }
+    private func renderArtworkImage(_ image: UIImage, targetSize: CGSize) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: rendererFormat())
+        let rect = CGRect(origin: .zero, size: targetSize)
+        let cornerRadius = min(targetSize.width, targetSize.height) * 0.24
+        let drawRect = aspectFillRect(for: image.size, in: rect)
 
-        guard
-            let appState,
-            let identifier = item.userInfo as? String,
-            let track = searchResultsByIdentifier[identifier]
-        else {
+        return renderer.image { _ in
+            UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius).addClip()
+            image.draw(in: drawRect)
+
+            UIColor.white.withAlphaComponent(0.1).setStroke()
+            let strokePath = UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: cornerRadius)
+            strokePath.lineWidth = 1
+            strokePath.stroke()
+        }
+    }
+
+    private func drawGradient(in rect: CGRect, palette: ArtworkPalette, context: CGContext) {
+        let colors = [palette.start.cgColor, palette.end.cgColor] as CFArray
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let locations: [CGFloat] = [0, 1]
+
+        guard let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: locations) else {
+            context.setFillColor(palette.start.cgColor)
+            context.fill(rect)
             return
         }
 
-        appState.play(track: track, queue: currentSearchResults)
-        interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+        context.drawLinearGradient(
+            gradient,
+            start: CGPoint(x: rect.minX, y: rect.minY),
+            end: CGPoint(x: rect.maxX, y: rect.maxY),
+            options: []
+        )
+    }
+
+    private func palette(for seed: String) -> ArtworkPalette {
+        let palettes: [ArtworkPalette] = [
+            ArtworkPalette(
+                start: UIColor(red: 0.98, green: 0.37, blue: 0.25, alpha: 1),
+                end: UIColor(red: 1.00, green: 0.72, blue: 0.33, alpha: 1),
+                accent: UIColor(red: 1.00, green: 0.59, blue: 0.30, alpha: 1)
+            ),
+            ArtworkPalette(
+                start: UIColor(red: 0.17, green: 0.75, blue: 0.64, alpha: 1),
+                end: UIColor(red: 0.16, green: 0.49, blue: 0.92, alpha: 1),
+                accent: UIColor(red: 0.25, green: 0.86, blue: 0.78, alpha: 1)
+            ),
+            ArtworkPalette(
+                start: UIColor(red: 0.34, green: 0.43, blue: 0.96, alpha: 1),
+                end: UIColor(red: 0.67, green: 0.30, blue: 0.93, alpha: 1),
+                accent: UIColor(red: 0.57, green: 0.51, blue: 1.00, alpha: 1)
+            ),
+            ArtworkPalette(
+                start: UIColor(red: 0.99, green: 0.27, blue: 0.54, alpha: 1),
+                end: UIColor(red: 0.72, green: 0.25, blue: 0.90, alpha: 1),
+                accent: UIColor(red: 1.00, green: 0.41, blue: 0.68, alpha: 1)
+            ),
+            ArtworkPalette(
+                start: UIColor(red: 0.34, green: 0.76, blue: 0.34, alpha: 1),
+                end: UIColor(red: 0.12, green: 0.58, blue: 0.48, alpha: 1),
+                accent: UIColor(red: 0.47, green: 0.88, blue: 0.45, alpha: 1)
+            )
+        ]
+
+        let hash = seed.unicodeScalars.reduce(into: 0) { partialResult, scalar in
+            partialResult = ((partialResult * 31) + Int(scalar.value)) % 10_000
+        }
+
+        return palettes[hash % palettes.count]
+    }
+
+    private func toggleShuffle() {
+        guard let appState = self.appState ?? AppContainer.shared.appState else { return }
+        appState.toggleShuffle()
+        refresh(using: appState)
+    }
+
+    private func configureNowPlayingTemplate(using appState: AppState?) {
+        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+        nowPlayingTemplate.isUpNextButtonEnabled = false
+        nowPlayingTemplate.isAlbumArtistButtonEnabled = false
+
+        guard let appState else {
+            nowPlayingTemplate.updateNowPlayingButtons([])
+            return
+        }
+
+        let shuffleImageName = appState.shuffleMode ? "shuffle.circle.fill" : "shuffle.circle"
+        let shuffleButton = CPNowPlayingImageButton(
+            image: UIImage(systemName: shuffleImageName) ?? UIImage()
+        ) { [weak self] _ in
+            self?.toggleShuffle()
+        }
+
+        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
+    }
+
+    private func startingTrack(for tracks: [Track], shuffled: Bool) -> Track {
+        guard shuffled else { return tracks[0] }
+        return tracks.randomElement() ?? tracks[0]
+    }
+
+    private func presentAlert(title: String) {
+        guard let interfaceController else { return }
+
+        let dismissAction = CPAlertAction(title: "OK", style: .cancel) { [weak interfaceController] _ in
+            interfaceController?.dismissTemplate(animated: true, completion: nil)
+        }
+        let alert = CPAlertTemplate(titleVariants: [title], actions: [dismissAction])
+        interfaceController.presentTemplate(alert, animated: true, completion: nil)
+    }
+
+    private func rendererFormat() -> UIGraphicsImageRendererFormat {
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale = interfaceController?.carTraitCollection.displayScale ?? UIScreen.main.scale
+        return format
+    }
+
+    private func listItemImageSize() -> CGSize {
+        let size = CPListItem.maximumImageSize
+        guard size.width > 0, size.height > 0 else {
+            return CGSize(width: 56, height: 56)
+        }
+
+        return size
+    }
+
+    private func sectionHeaderImageSize() -> CGSize {
+        guard CPMaximumListSectionImageSize.width > 0, CPMaximumListSectionImageSize.height > 0 else {
+            return CGSize(width: 26, height: 26)
+        }
+
+        return CPMaximumListSectionImageSize
+    }
+
+    private func aspectFillRect(for imageSize: CGSize, in bounds: CGRect) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return bounds }
+
+        let scale = max(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+
+        return CGRect(
+            x: bounds.midX - (scaledSize.width / 2),
+            y: bounds.midY - (scaledSize.height / 2),
+            width: scaledSize.width,
+            height: scaledSize.height
+        )
+    }
+
+    private func trackIdentifier(for track: Track) -> String {
+        track.youtubeVideoID ?? track.id
     }
 }
