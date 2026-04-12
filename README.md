@@ -69,8 +69,12 @@ After Apple approves the CarPlay audio entitlement for your App ID, add this key
 
 ## Next recommended production steps
 
-- Verify the GitHub Pages domain in Google Search Console and add `tools-source.github.io` as an authorized domain in Google Auth Platform.
-- Publish branding after the homepage, privacy policy, and terms links are live.
+- Verify the live public site domain in Google Search Console before requesting Google Auth Platform branding review. For the current deployment, verify `https://music--musicapp-55a60.us-east4.hosted.app/` as a URL-prefix property using the same Google account that owns the Cloud project.
+- Keep the app domain links distinct and publicly reachable on the same verified domain:
+  - home: `https://music--musicapp-55a60.us-east4.hosted.app/`
+  - privacy: `https://music--musicapp-55a60.us-east4.hosted.app/PRIVACY_POLICY.html`
+  - terms: `https://music--musicapp-55a60.us-east4.hosted.app/TERMS.html`
+- Publish branding only after the homepage, privacy policy, and terms links are live and returning their own pages without redirecting back to the home page.
 - Move token exchange to your backend and store refresh tokens server-side.
 - Add offline downloads and queue persistence.
 - Add voice intents for Siri + steering wheel controls.

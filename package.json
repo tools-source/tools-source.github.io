@@ -2,7 +2,7 @@
   "name": "musictube-static-site",
   "version": "1.0.0",
   "scripts": {
-    "start": "serve -s ."
+    "start": "serve . -l tcp://0.0.0.0:${PORT:-8080}"
   },
   "dependencies": {
     "serve": "^14.0.0"

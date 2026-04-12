@@ -58,6 +58,7 @@
 		E11BAA444D53E9E68F1858C9 /* RemoteYouTubeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EF6D71B21CC3C7447208CEF /* RemoteYouTubeClient.swift */; };
 		E235C1876FE15D19FBC1649E /* Logging.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF5A989D93E02683ACFF0BC9 /* Logging.swift */; };
 		EBCCF0F1819151A4DCB271AB /* Errors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F035DCBB02183AE303FE53B /* Errors.swift */; };
+		F0A1B2C3D4E5F60718293A4B /* LocalMusicProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0A1B2C3D4E5F60718293A4C /* LocalMusicProfileStore.swift */; };
 		F37D882DE4194C135ACF2ED9 /* RemoteStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F35E293677C6B0BE9DDF51 /* RemoteStream.swift */; };
 		F6BA780231D5FFFCF180CC3A /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D568E9DD579D1A7E175FF4FC /* SearchView.swift */; };
 /* End PBXBuildFile section */
@@ -119,6 +120,7 @@
 		E3CBFF6921957C90AD8CF475 /* PlaybackService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackService.swift; sourceTree = "<group>"; };
 		E5F35E293677C6B0BE9DDF51 /* RemoteStream.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteStream.swift; sourceTree = "<group>"; };
 		EF567E1FBF8942688D4A4890 /* TrackRowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TrackRowView.swift; sourceTree = "<group>"; };
+		F0A1B2C3D4E5F60718293A4C /* LocalMusicProfileStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalMusicProfileStore.swift; sourceTree = "<group>"; };
 		F298716D438822E28A886E88 /* Method.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Method.swift; sourceTree = "<group>"; };
 		F6A02B37D10821A7012FB47B /* Parser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Parser.swift; sourceTree = "<group>"; };
 		FD44BEF10FC6DB4D5134D061 /* StreamQuery.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StreamQuery.swift; sourceTree = "<group>"; };
@@ -322,6 +324,7 @@
 		DECBB189AA39B7D8F09ED720 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				F0A1B2C3D4E5F60718293A4C /* LocalMusicProfileStore.swift */,
 				E3CBFF6921957C90AD8CF475 /* PlaybackService.swift */,
 				D1C2549105F6A718CC58A8A7 /* ServiceProtocols.swift */,
 				6F1F52F674C8F2E975092F7A /* YouTubeAPIService.swift */,
@@ -431,6 +434,7 @@
 				662F163926E2A336CDCCE51D /* CarPlaySceneDelegate.swift in Sources */,
 				D642D610165A4ED33D43CABF /* Track.swift in Sources */,
 				664421AE0100A1A04DE6DD05 /* YouTubeUser.swift in Sources */,
+				F0A1B2C3D4E5F60718293A4B /* LocalMusicProfileStore.swift in Sources */,
 				5C190D2DB7FCC2A37C0E03A7 /* PlaybackService.swift in Sources */,
 				BB2ECFA539674D5F69099576 /* ServiceProtocols.swift in Sources */,
 				8A3207B43960446757842DBF /* YouTubeAPIService.swift in Sources */,

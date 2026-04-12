@@ -9,11 +9,13 @@ final class YouTubeAuthService: NSObject, AuthProviding {
         static let authEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         static let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
         static let userInfoEndpoint = URL(string: "https://www.googleapis.com/oauth2/v2/userinfo")!
+        static let currentScopeVersion = 2
         static let scope = [
             "openid",
             "email",
             "profile",
-            "https://www.googleapis.com/auth/youtube.readonly"
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
         ].joined(separator: " ")
     }
 
@@ -65,6 +67,11 @@ final class YouTubeAuthService: NSObject, AuthProviding {
             let data = loadStoredSessionData(),
             let session = try? JSONDecoder().decode(YouTubeSession.self, from: data)
         else {
+            return nil
+        }
+
+        guard session.scopeVersion >= Constants.currentScopeVersion else {
+            clearStoredSession()
             return nil
         }
 
@@ -144,7 +151,8 @@ final class YouTubeAuthService: NSObject, AuthProviding {
             accessToken: accessToken,
             refreshToken: token.refreshToken,
             expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            user: user
+            user: user,
+            scopeVersion: Constants.currentScopeVersion
         )
 
         persistSession(session)
@@ -183,7 +191,8 @@ final class YouTubeAuthService: NSObject, AuthProviding {
             accessToken: accessToken,
             refreshToken: token.refreshToken ?? session.refreshToken,
             expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            user: session.user
+            user: session.user,
+            scopeVersion: Constants.currentScopeVersion
         )
     }
 

@@ -33,6 +33,18 @@ struct PlayerView: View {
                 VStack(spacing: 18) {
                     transportControls
 
+                    Button {
+                        appState.toggleLike(for: track)
+                    } label: {
+                        Label(
+                            appState.isTrackLiked(track) ? "Saved to Liked Songs" : "Save to Liked Songs",
+                            systemImage: appState.isTrackLiked(track) ? "heart.fill" : "heart"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(appState.isTrackLiked(track) ? .pink : .white)
+                    }
+                    .buttonStyle(.plain)
+
                     if appState.isPreparingPlayback {
                         HStack(spacing: 10) {
                             ProgressView()

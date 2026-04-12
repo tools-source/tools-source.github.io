@@ -14,8 +14,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private var player: AVPlayer?
     private var activeStreamURL: URL?
     private var playbackObservation: NSKeyValueObservation?
+    private var playerItemStatusObservation: NSKeyValueObservation?
+    private var playbackStartupTask: Task<Void, Never>?
     private var resolveTask: Task<Void, Never>?
-    private var resolvedStreamCache: [String: URL] = [:]
     private var playbackQueue: [Track] = []
     private var playbackQueueIndex: Int?
     private var itemDidEndObserver: NSObjectProtocol?
@@ -74,15 +75,11 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         resolveTask = nil
         isResolvingStream = false
         playbackErrorMessage = nil
-        player?.pause()
-        player = nil
-        playbackObservation = nil
-        activeStreamURL = nil
+        tearDownPlayer()
         nowPlaying = nil
         isPlaying = false
         playbackQueue = []
         playbackQueueIndex = nil
-        removeItemDidEndObserver()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         updateQueueState()
     }
@@ -90,22 +87,16 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private func startPlayback(for track: Track) {
         resolveTask?.cancel()
         resolveTask = nil
+        playbackStartupTask?.cancel()
+        playbackStartupTask = nil
         playbackErrorMessage = nil
         nowPlaying = track
         updateNowPlayingInfo(for: track)
-        player?.pause()
-        player = nil
-        playbackObservation = nil
-        activeStreamURL = nil
+        tearDownPlayer()
 
         if let streamURL = track.streamURL {
-            startPlayback(from: streamURL, for: track)
-        } else if let videoID = track.youtubeVideoID {
-            if let cachedURL = resolvedStreamCache[videoID] {
-                startPlayback(from: cachedURL, for: track)
-                return
-            }
-
+            startPlayback(fromCandidates: [streamURL], for: track)
+        } else if track.youtubeVideoID != nil {
             isResolvingStream = true
             updatePlaybackState()
 
@@ -113,16 +104,12 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 guard let self else { return }
 
                 do {
-                    let resolvedURL = try await self.extractPlayableStreamURL(for: track)
+                    let resolvedURLs = try await self.extractPlayableStreamCandidates(for: track)
 
                     guard Task.isCancelled == false else { return }
                     guard self.nowPlaying?.id == track.id else { return }
 
-                    if let videoID = track.youtubeVideoID {
-                        self.resolvedStreamCache[videoID] = resolvedURL
-                    }
-
-                    self.startPlayback(from: resolvedURL, for: track)
+                    self.startPlayback(fromCandidates: resolvedURLs, for: track)
                 } catch is CancellationError {
                     guard self.nowPlaying?.id == track.id else { return }
                     self.isResolvingStream = false
@@ -167,6 +154,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     func pause() {
         resolveTask?.cancel()
         resolveTask = nil
+        playbackStartupTask?.cancel()
+        playbackStartupTask = nil
         isResolvingStream = false
         player?.pause()
         isPlaying = false
@@ -241,28 +230,96 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         updateQueueState()
     }
 
-    private func startPlayback(from url: URL, for track: Track) {
-        resolveTask?.cancel()
-        resolveTask = nil
+    private func tearDownPlayer() {
+        playbackStartupTask?.cancel()
+        playbackStartupTask = nil
+        playerItemStatusObservation = nil
+        playbackObservation = nil
+        player?.pause()
+        player = nil
+        activeStreamURL = nil
+        removeItemDidEndObserver()
+    }
+
+    private func startPlayback(fromCandidates candidateURLs: [URL], for track: Track, candidateIndex: Int = 0) {
+        let uniqueCandidates = deduplicatedURLs(candidateURLs)
+
+        guard candidateIndex < uniqueCandidates.count else {
+            tearDownPlayer()
+            isResolvingStream = false
+            isPlaying = false
+            playbackErrorMessage = "MusicTube couldn't start audio for this YouTube item right now."
+            updatePlaybackState()
+            return
+        }
+
+        let url = uniqueCandidates[candidateIndex]
+        tearDownPlayer()
         isResolvingStream = false
         activeStreamURL = url
 
-        let player = AVPlayer(url: url)
+        let playerItem = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: playerItem)
         player.automaticallyWaitsToMinimizeStalling = true
         self.player = player
-        registerItemDidEndObserver(for: player.currentItem)
+        registerItemDidEndObserver(for: playerItem)
+
+        playerItemStatusObservation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.nowPlaying?.id == track.id else { return }
+
+                switch item.status {
+                case .failed:
+                    self.startPlayback(
+                        fromCandidates: uniqueCandidates,
+                        for: track,
+                        candidateIndex: candidateIndex + 1
+                    )
+                case .readyToPlay:
+                    self.playbackStartupTask?.cancel()
+                    self.playbackStartupTask = nil
+                case .unknown:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        }
 
         playbackObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.isPlaying = player.timeControlStatus == .playing
+                if player.timeControlStatus == .playing {
+                    self.playbackStartupTask?.cancel()
+                    self.playbackStartupTask = nil
+                }
                 self.updatePlaybackState()
             }
         }
 
         updateNowPlayingInfo(for: track)
         player.play()
-        isPlaying = true
+        isPlaying = false
+        updatePlaybackState()
+
+        playbackStartupTask = Task { [weak self, weak player] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, let player else { return }
+            guard Task.isCancelled == false else { return }
+            guard self.nowPlaying?.id == track.id else { return }
+
+            if player.timeControlStatus != .playing,
+               player.currentItem?.status != .readyToPlay {
+                self.startPlayback(
+                    fromCandidates: uniqueCandidates,
+                    for: track,
+                    candidateIndex: candidateIndex + 1
+                )
+            }
+        }
+
         updatePlaybackState()
     }
 
@@ -334,9 +391,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
     }
 
-    private func extractPlayableStreamURL(for track: Track) async throws -> URL {
+    private func extractPlayableStreamCandidates(for track: Track) async throws -> [URL] {
         if let directURL = track.streamURL {
-            return directURL
+            return [directURL]
         }
 
         guard let videoID = track.youtubeVideoID else {
@@ -345,21 +402,69 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         let youtube = YouTube(videoID: videoID, methods: [.local, .remote])
         let streams = try await youtube.streams
+        let candidateURLs = deduplicatedURLs(
+            preferredPlaybackStreams(from: streams).map(\.url)
+        )
 
-        if let audioOnlyStream = streams
-            .filterAudioOnly()
-            .filter({ $0.isNativelyPlayable })
-            .highestAudioBitrateStream() {
-            return audioOnlyStream.url
-        }
-
-        if let audioCapableStream = streams
-            .filter({ $0.includesAudioTrack && $0.isNativelyPlayable })
-            .highestAudioBitrateStream() {
-            return audioCapableStream.url
+        if candidateURLs.isEmpty == false {
+            return candidateURLs
         }
 
         throw PlaybackError.noPlayableStream
+    }
+
+    private func preferredPlaybackStreams(from streams: [Stream]) -> [Stream] {
+        streams
+            .filter { $0.includesAudioTrack && $0.isNativelyPlayable }
+            .sorted { lhs, rhs in
+                let lhsScore = playbackPreferenceScore(for: lhs)
+                let rhsScore = playbackPreferenceScore(for: rhs)
+
+                if lhsScore != rhsScore {
+                    return lhsScore > rhsScore
+                }
+
+                return (lhs.itag.audioBitrate ?? 0) > (rhs.itag.audioBitrate ?? 0)
+            }
+    }
+
+    private func playbackPreferenceScore(for stream: Stream) -> Int {
+        var score = 0
+
+        if stream.includesAudioTrack && stream.includesVideoTrack == false {
+            score += 50
+        }
+
+        if stream.fileExtension == .m4a {
+            score += 40
+        } else if stream.fileExtension == .mp4 {
+            score += 30
+        }
+
+        if stream.audioCodec == .mp4a {
+            score += 35
+        }
+
+        if stream.videoCodec == .avc1 {
+            score += 10
+        }
+
+        if stream.audioCodec == .ec3 || stream.audioCodec == .ac3 {
+            score -= 20
+        }
+
+        if stream.fileExtension == .m3u8 || stream.itag.isHLS {
+            score -= 10
+        }
+
+        return score
+    }
+
+    private func deduplicatedURLs(_ urls: [URL]) -> [URL] {
+        var seenURLs: Set<String> = []
+        return urls.filter { url in
+            seenURLs.insert(url.absoluteString).inserted
+        }
     }
 }
 

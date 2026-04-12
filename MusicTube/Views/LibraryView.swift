@@ -24,21 +24,55 @@ struct LibraryView: View {
                     }
                 }
 
-                Section("All Collections") {
-                    if appState.isLoadingPlaylists && appState.playlists.isEmpty {
+                if let libraryStatusMessage = appState.libraryStatusMessage,
+                   appState.playlists.isEmpty,
+                   appState.isLoadingPlaylists == false {
+                    Section("Library Status") {
+                        Text(libraryStatusMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if appState.isLoadingPlaylists && appState.playlists.isEmpty {
+                    Section("Library") {
                         HStack {
                             ProgressView()
                             Text("Importing collections...")
                                 .foregroundStyle(.secondary)
                         }
-                    } else if appState.playlists.isEmpty {
-                        Text("No playlists or liked collections found for this account yet.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(appState.playlists) { playlist in
-                            NavigationLink(value: playlist) {
-                                PlaylistRow(playlist: playlist)
+                    }
+                } else {
+                    Section("Liked Songs") {
+                        if let likedSongs = appState.likedSongsPlaylist {
+                            NavigationLink(value: likedSongs) {
+                                PlaylistRow(playlist: likedSongs)
+                            }
+                        } else {
+                            Text(
+                                appState.isUsingLocalLibraryFallback
+                                    ? "Tap the heart on a song to save it here."
+                                    : (appState.libraryStatusMessage ?? "No liked songs were found for this account yet.")
+                            )
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("Playlists") {
+                        if appState.libraryPlaylists.isEmpty {
+                            Text(
+                                appState.isUsingLocalLibraryFallback
+                                    ? "Search and play songs to start building Replay Mix and Favorites Mix."
+                                    : (appState.libraryStatusMessage ?? "No playlists found for this account yet.")
+                            )
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(appState.libraryPlaylists) { playlist in
+                                NavigationLink(value: playlist) {
+                                    PlaylistRow(playlist: playlist)
+                                }
                             }
                         }
                     }
@@ -84,7 +118,7 @@ private struct PlaylistRow: View {
     private var itemCountLabel: String {
         switch playlist.kind {
         case .likedMusic:
-            return "Music only"
+            return playlist.itemCount == 1 ? "1 song" : "\(playlist.itemCount) songs"
         case .uploads:
             return playlist.itemCount == 1 ? "1 upload" : "\(playlist.itemCount) uploads"
         case .standard:

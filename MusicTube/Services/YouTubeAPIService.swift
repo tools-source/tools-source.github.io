@@ -15,6 +15,8 @@ final class YouTubeAPIService: MusicCatalogProviding {
     private let urlSession: URLSession
     private let apiKey: String?
     private let likedMusicPlaylistID = "liked-music"
+    private let innerTubeSearchURL = URL(string: "https://www.youtube.com/youtubei/v1/search?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false")!
+    private let innerTubeClientVersion = "2.20260114.08.00"
 
     init(urlSession: URLSession = .shared, apiKey: String? = Bundle.main.object(forInfoDictionaryKey: "YOUTUBE_API_KEY") as? String) {
         self.urlSession = urlSession
@@ -22,58 +24,221 @@ final class YouTubeAPIService: MusicCatalogProviding {
     }
 
     func loadHome(accessToken: String) async throws -> (featured: [Track], recent: [Track]) {
-        await loadAuthorizedHome(accessToken: accessToken)
+        try await loadAuthorizedHome(accessToken: accessToken)
     }
 
     func search(query: String, accessToken: String) async throws -> [Track] {
-        guard let apiKey = validatedAPIKey else {
-            return []
+        if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 25),
+           innerTubeResults.isEmpty == false {
+            return innerTubeResults
         }
 
         do {
-            return try await fetchSearchResults(
+            let musicResults = try await fetchSearchResults(
+                query: query,
+                accessToken: accessToken,
+                maxResults: 25
+            )
+            if musicResults.isEmpty == false {
+                return musicResults
+            }
+
+            let broaderResults = try await fetchSearchResults(
+                query: query,
+                accessToken: accessToken,
+                maxResults: 25,
+                musicOnly: false
+            )
+            if broaderResults.isEmpty == false {
+                return broaderResults
+            }
+        } catch {
+            if let apiKey = validatedAPIKey {
+                let fallbackResults = try? await fetchSearchResults(
+                    query: query,
+                    apiKey: apiKey,
+                    maxResults: 25
+                )
+                if let fallbackResults, fallbackResults.isEmpty == false {
+                    return fallbackResults
+                }
+            }
+
+            throw error
+        }
+
+        if let apiKey = validatedAPIKey {
+            let fallbackResults = try? await fetchSearchResults(
                 query: query,
                 apiKey: apiKey,
                 maxResults: 25
             )
-        } catch {
-            return []
+            if let fallbackResults, fallbackResults.isEmpty == false {
+                return fallbackResults
+            }
+
+            let broaderFallbackResults = try? await fetchSearchResults(
+                query: query,
+                apiKey: apiKey,
+                maxResults: 25,
+                musicOnly: false
+            )
+            if let broaderFallbackResults, broaderFallbackResults.isEmpty == false {
+                return broaderFallbackResults
+            }
         }
+
+        return []
     }
 
     func loadPlaylists(accessToken: String) async throws -> [Playlist] {
-        let related = try? await fetchRelatedPlaylists(accessToken: accessToken)
-        async let collections = fetchSystemCollections(related: related, accessToken: accessToken)
         async let userPlaylists = fetchUserPlaylists(accessToken: accessToken)
+        async let relatedPlaylists = fetchRelatedPlaylists(accessToken: accessToken)
 
-        let resolvedCollections = (try? await collections) ?? []
-        let resolvedUserPlaylists = (try? await userPlaylists) ?? []
-        var resolvedPlaylists = resolvedCollections + resolvedUserPlaylists
+        var loadErrors: [Error] = []
 
-        if resolvedPlaylists.contains(where: { $0.kind == .likedMusic }) == false,
-           let fallbackLikedMusicPlaylist = try? await fetchLikedMusicPlaylist(accessToken: accessToken) {
-            resolvedPlaylists.insert(fallbackLikedMusicPlaylist, at: 0)
+        let related: RelatedPlaylists?
+        do {
+            related = try await relatedPlaylists
+        } catch {
+            related = nil
+            loadErrors.append(error)
         }
 
-        return deduplicatedPlaylists(resolvedPlaylists)
+        let resolvedCollections: [Playlist]
+        do {
+            resolvedCollections = try await fetchSystemCollections(related: related, accessToken: accessToken)
+        } catch {
+            resolvedCollections = []
+            loadErrors.append(error)
+        }
+
+        let resolvedUserPlaylists: [Playlist]
+        do {
+            resolvedUserPlaylists = try await userPlaylists
+        } catch {
+            resolvedUserPlaylists = []
+            loadErrors.append(error)
+        }
+
+        let resolvedLikedTracks: [Track]
+        do {
+            resolvedLikedTracks = try await fetchLikedMusicTracks(
+                accessToken: accessToken,
+                relatedPlaylists: related,
+                maxItems: 200
+            )
+        } catch {
+            resolvedLikedTracks = []
+            loadErrors.append(error)
+        }
+
+        var resolvedPlaylists = resolvedCollections + resolvedUserPlaylists
+
+        if let fallbackLikedMusicPlaylist = makeLikedMusicPlaylist(
+            from: resolvedLikedTracks,
+            fallbackPlaylist: resolvedPlaylists.first(where: { $0.kind == .likedMusic })
+        ) {
+            if let existingIndex = resolvedPlaylists.firstIndex(where: { $0.kind == .likedMusic }) {
+                resolvedPlaylists[existingIndex] = fallbackLikedMusicPlaylist
+            } else {
+                resolvedPlaylists.insert(fallbackLikedMusicPlaylist, at: 0)
+            }
+        }
+
+        let prioritizedPlaylists = prioritizedLibraryPlaylists(resolvedPlaylists)
+        if prioritizedPlaylists.isEmpty, let loadError = loadErrors.first {
+            throw loadError
+        }
+
+        return prioritizedPlaylists
     }
 
-    private func loadAuthorizedHome(accessToken: String) async -> (featured: [Track], recent: [Track]) {
-        async let likedTracksTask = fetchLikedMusicTracks(accessToken: accessToken, maxItems: 50)
+    private func loadAuthorizedHome(accessToken: String) async throws -> (featured: [Track], recent: [Track]) {
         async let userPlaylistsTask = fetchUserPlaylists(accessToken: accessToken)
+        async let relatedPlaylistsTask = fetchRelatedPlaylists(accessToken: accessToken)
 
-        let likedTracks = (try? await likedTracksTask) ?? []
-        let userPlaylists = (try? await userPlaylistsTask) ?? []
-        let mixAlbums = userPlaylists.mixAlbumCandidates(limit: 4)
+        var loadErrors: [Error] = []
+
+        let relatedPlaylists: RelatedPlaylists?
+        do {
+            relatedPlaylists = try await relatedPlaylistsTask
+        } catch {
+            relatedPlaylists = nil
+            loadErrors.append(error)
+        }
+
+        let likedTracks: [Track]
+        do {
+            likedTracks = try await fetchLikedMusicTracks(
+                accessToken: accessToken,
+                relatedPlaylists: relatedPlaylists,
+                maxItems: 50
+            )
+        } catch {
+            likedTracks = []
+            loadErrors.append(error)
+        }
+
+        let userPlaylists: [Playlist]
+        do {
+            userPlaylists = try await userPlaylistsTask
+        } catch {
+            userPlaylists = []
+            loadErrors.append(error)
+        }
+
+        let systemCollections: [Playlist]
+        do {
+            systemCollections = try await fetchSystemCollections(related: relatedPlaylists, accessToken: accessToken)
+        } catch {
+            systemCollections = []
+            loadErrors.append(error)
+        }
+
+        let playlistSources = prioritizedLibraryPlaylists(systemCollections + userPlaylists)
+        let mixAlbums = selectSuggestedMixes(from: playlistSources, limit: 6)
         let tracksByPlaylist = await fetchTracks(
             for: mixAlbums,
             accessToken: accessToken,
-            maxItemsPerPlaylist: 20
+            maxItemsPerPlaylist: 24
         )
 
-        let mixTracks = mixAlbums.flatMap { tracksByPlaylist[$0.id] ?? [] }
-        let featured = Array(deduplicatedTracks(likedTracks + mixTracks).prefix(25))
-        let recent = Array(deduplicatedTracks(mixTracks + likedTracks).prefix(15))
+        let mixTracks = mixAlbums.flatMap { randomizedTracks(from: tracksByPlaylist[$0.id] ?? [], limit: 12) }
+        let seedTracks = deduplicatedTracks(likedTracks + mixTracks)
+
+        guard seedTracks.isEmpty == false else {
+            if let loadError = loadErrors.first {
+                throw loadError
+            }
+            return ([], [])
+        }
+
+        let personalizedTracks: [Track]
+        do {
+            personalizedTracks = try await fetchPersonalizedMusic(
+                seedTracks: seedTracks,
+                accessToken: accessToken
+            )
+        } catch {
+            personalizedTracks = []
+            loadErrors.append(error)
+        }
+
+        let featuredPool = deduplicatedTracks(
+            personalizedTracks.shuffled() + likedTracks.shuffled() + mixTracks.shuffled()
+        )
+        let featured = Array(featuredPool.prefix(25))
+        let featuredIDs = Set(featured.map(trackIdentifier))
+        let recent = Array(
+            deduplicatedTracks(mixTracks.shuffled() + personalizedTracks.shuffled() + likedTracks.shuffled())
+                .filter { featuredIDs.contains(trackIdentifier($0)) == false }
+                .prefix(25)
+        )
+
+        if featured.isEmpty, recent.isEmpty, let loadError = loadErrors.first {
+            throw loadError
+        }
 
         return (featured, recent)
     }
@@ -125,7 +290,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 if playlist.id == related.likes {
                     return Playlist(
                         id: playlist.id,
-                        title: "Liked songs",
+                        title: "Liked Songs",
                         description: "Music-only items from your likes",
                         artworkURL: playlist.artworkURL,
                         itemCount: playlist.itemCount,
@@ -169,8 +334,13 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     func loadPlaylistItems(for playlist: Playlist, accessToken: String) async throws -> [Track] {
         if playlist.kind == .likedMusic {
+            let relatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
             do {
-                return try await fetchLikedMusicTracks(accessToken: accessToken, maxItems: 200)
+                return try await fetchLikedMusicTracks(
+                    accessToken: accessToken,
+                    relatedPlaylists: relatedPlaylists,
+                    maxItems: 200
+                )
             } catch {
                 guard playlist.id != likedMusicPlaylistID else {
                     throw error
@@ -219,16 +389,24 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
     }
 
-    private func fetchSearchResults(query: String, apiKey: String, maxResults: Int) async throws -> [Track] {
+    private func fetchSearchResults(
+        query: String,
+        apiKey: String,
+        maxResults: Int,
+        musicOnly: Bool = true
+    ) async throws -> [Track] {
         var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/search")!
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "part", value: "snippet"),
             URLQueryItem(name: "type", value: "video"),
-            URLQueryItem(name: "videoCategoryId", value: "10"),
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "maxResults", value: String(maxResults)),
             URLQueryItem(name: "key", value: apiKey)
         ]
+        if musicOnly {
+            queryItems.insert(URLQueryItem(name: "videoCategoryId", value: "10"), at: 2)
+        }
+        components.queryItems = queryItems
 
         let (data, urlResponse) = try await urlSession.data(from: components.url!)
         let response = try decodeResponse(VideoSearchResponse.self, from: data, response: urlResponse)
@@ -245,34 +423,94 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
     }
 
-    private func fetchPersonalizedMusic(seedTracks: [Track], apiKey: String) async throws -> [Track] {
-        guard seedTracks.isEmpty == false else {
-            return try await fetchMostPopularMusic(apiKey: apiKey)
+    private func fetchSearchResults(
+        query: String,
+        accessToken: String,
+        maxResults: Int,
+        musicOnly: Bool = true
+    ) async throws -> [Track] {
+        var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/search")!
+        var queryItems = [
+            URLQueryItem(name: "part", value: "snippet"),
+            URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "maxResults", value: String(maxResults))
+        ]
+        if musicOnly {
+            queryItems.insert(URLQueryItem(name: "videoCategoryId", value: "10"), at: 2)
         }
-        let seedArtists = Array(orderedUniqueStrings(seedTracks.map(\.artist)).prefix(4))
+        components.queryItems = authorizedQueryItems(queryItems)
+
+        let request = authorizedRequest(url: components.url!, accessToken: accessToken)
+        let (data, urlResponse) = try await urlSession.data(for: request)
+        let response = try decodeResponse(VideoSearchResponse.self, from: data, response: urlResponse)
+        return response.items.compactMap(track(from:))
+    }
+
+    private func fetchPersonalizedMusic(seedTracks: [Track], accessToken: String) async throws -> [Track] {
+        guard seedTracks.isEmpty == false else {
+            return []
+        }
+        let seedArtists = Array(orderedUniqueStrings(seedTracks.shuffled().map(\.artist)).prefix(4))
 
         guard seedArtists.isEmpty == false else {
-            return try await fetchMostPopularMusic(apiKey: apiKey)
+            return Array(deduplicatedTracks(seedTracks.shuffled()).prefix(25))
         }
 
         let excludedIDs = Set(seedTracks.compactMap(\.youtubeVideoID))
         var recommendations: [Track] = []
+        let querySuffixes = [
+            "official audio",
+            "official music video",
+            "lyrics",
+            "live session"
+        ]
 
         for artist in seedArtists {
-            let query = "\(artist) official audio"
-            let results = try await fetchSearchResults(query: query, apiKey: apiKey, maxResults: 8)
+            let query = "\(artist) \(querySuffixes.randomElement() ?? "official audio")"
+            let results: [Track]
+            if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 8),
+               innerTubeResults.isEmpty == false {
+                results = innerTubeResults
+            } else {
+                results = try await fetchSearchResults(
+                    query: query,
+                    accessToken: accessToken,
+                    maxResults: 8,
+                    musicOnly: false
+                )
+            }
             recommendations.append(contentsOf: results.filter { track in
                 guard let videoID = track.youtubeVideoID else { return true }
                 return excludedIDs.contains(videoID) == false
             })
         }
 
-        let deduped = deduplicatedTracks(recommendations)
+        let deduped = deduplicatedTracks(recommendations.shuffled())
         if deduped.isEmpty {
-            return try await fetchMostPopularMusic(apiKey: apiKey)
+            return Array(deduplicatedTracks(seedTracks.shuffled()).prefix(25))
         }
 
         return Array(deduped.prefix(25))
+    }
+
+    private func fetchFallbackDiscoveryTracks() async throws -> [Track] {
+        let fallbackQueries = [
+            "new music official audio",
+            "viral songs official music video",
+            "top songs playlist",
+            "latest hits official audio",
+            "music mix",
+            "best songs 2026"
+        ].shuffled()
+
+        var collectedTracks: [Track] = []
+        for query in fallbackQueries.prefix(3) {
+            let results = try await fetchSearchResultsViaInnerTube(query: query, maxResults: 12)
+            collectedTracks.append(contentsOf: results)
+        }
+
+        return Array(deduplicatedTracks(collectedTracks.shuffled()).prefix(25))
     }
 
     private func fetchRelatedPlaylists(accessToken: String) async throws -> RelatedPlaylists? {
@@ -358,6 +596,106 @@ final class YouTubeAPIService: MusicCatalogProviding {
         )
     }
 
+    private func fetchSearchResultsViaInnerTube(query: String, maxResults: Int) async throws -> [Track] {
+        var request = URLRequest(url: innerTubeSearchURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(innerTubeClientVersion, forHTTPHeaderField: "X-Youtube-Client-Version")
+        request.setValue("1", forHTTPHeaderField: "X-Youtube-Client-Name")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "context": [
+                    "client": [
+                        "clientName": "WEB",
+                        "clientVersion": innerTubeClientVersion
+                    ]
+                ],
+                "query": query
+            ]
+        )
+
+        let (data, response) = try await urlSession.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           (200 ..< 300).contains(httpResponse.statusCode) == false {
+            throw APIError.serviceError("YouTube internal search returned status \(httpResponse.statusCode).")
+        }
+
+        let object = try JSONSerialization.jsonObject(with: data)
+        let renderers = collectObjects(matchingKey: "videoRenderer", in: object)
+
+        let tracks = renderers.compactMap(track(fromInnerTubeVideoRenderer:))
+        return Array(deduplicatedTracks(tracks).prefix(maxResults))
+    }
+
+    private func collectObjects(matchingKey key: String, in object: Any) -> [[String: Any]] {
+        if let dictionary = object as? [String: Any] {
+            var matches: [[String: Any]] = []
+            if let match = dictionary[key] as? [String: Any] {
+                matches.append(match)
+            }
+
+            for value in dictionary.values {
+                matches.append(contentsOf: collectObjects(matchingKey: key, in: value))
+            }
+            return matches
+        }
+
+        if let array = object as? [Any] {
+            return array.flatMap { collectObjects(matchingKey: key, in: $0) }
+        }
+
+        return []
+    }
+
+    private func track(fromInnerTubeVideoRenderer renderer: [String: Any]) -> Track? {
+        guard let videoID = renderer["videoId"] as? String else { return nil }
+
+        let title = text(from: renderer["title"]) ?? "YouTube Track"
+        let artist =
+            text(from: renderer["longBylineText"]) ??
+            text(from: renderer["ownerText"]) ??
+            text(from: renderer["shortBylineText"]) ??
+            "YouTube"
+        let artworkURL = bestThumbnailURL(from: renderer["thumbnail"])
+
+        return Track(
+            id: videoID,
+            title: title,
+            artist: artist,
+            artworkURL: artworkURL,
+            youtubeVideoID: videoID
+        )
+    }
+
+    private func text(from object: Any?) -> String? {
+        guard let dictionary = object as? [String: Any] else { return nil }
+
+        if let simpleText = dictionary["simpleText"] as? String, simpleText.isEmpty == false {
+            return simpleText
+        }
+
+        if let runs = dictionary["runs"] as? [[String: Any]] {
+            let joined = runs.compactMap { $0["text"] as? String }.joined()
+            return joined.isEmpty ? nil : joined
+        }
+
+        return nil
+    }
+
+    private func bestThumbnailURL(from object: Any?) -> URL? {
+        guard
+            let dictionary = object as? [String: Any],
+            let thumbnails = dictionary["thumbnails"] as? [[String: Any]],
+            let lastThumbnail = thumbnails.last,
+            let urlString = lastThumbnail["url"] as? String
+        else {
+            return nil
+        }
+
+        return URL(string: urlString)
+    }
+
     private func authorizedRequest(url: URL, accessToken: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -366,19 +704,46 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func fetchLikedMusicPlaylist(accessToken: String) async throws -> Playlist? {
         let likedTracks = try await fetchLikedMusicTracks(accessToken: accessToken, maxItems: 12)
-        guard likedTracks.isEmpty == false else { return nil }
-
-        return Playlist(
-            id: likedMusicPlaylistID,
-            title: "Liked songs",
-            description: "Music-only items from your likes",
-            artworkURL: likedTracks.first?.artworkURL,
-            itemCount: likedTracks.count,
-            kind: .likedMusic
-        )
+        return makeLikedMusicPlaylist(from: likedTracks)
     }
 
-    private func fetchLikedMusicTracks(accessToken: String, maxItems: Int) async throws -> [Track] {
+    private func fetchLikedMusicTracks(
+        accessToken: String,
+        relatedPlaylists: RelatedPlaylists? = nil,
+        maxItems: Int
+    ) async throws -> [Track] {
+        do {
+            return try await fetchLikedMusicTracksByRating(accessToken: accessToken, maxItems: maxItems)
+        } catch {
+            guard let likesPlaylistID = relatedPlaylists?.likes else {
+                throw error
+            }
+
+            let likesPlaylist = Playlist(
+                id: likesPlaylistID,
+                title: "Liked Songs",
+                description: "Music-only items from your likes",
+                artworkURL: nil,
+                itemCount: maxItems,
+                kind: .likedMusic
+            )
+
+            let playlistTracks = try await fetchPlaylistItems(
+                for: likesPlaylist,
+                accessToken: accessToken,
+                maxItems: maxItems
+            )
+            let filteredTracks = (try? await filterMusicTracks(playlistTracks, accessToken: accessToken)) ?? playlistTracks
+
+            guard filteredTracks.isEmpty == false else {
+                throw error
+            }
+
+            return Array(deduplicatedTracks(filteredTracks).prefix(maxItems))
+        }
+    }
+
+    private func fetchLikedMusicTracksByRating(accessToken: String, maxItems: Int) async throws -> [Track] {
         var tracks: [Track] = []
         var nextPageToken: String?
         var requiresMusicFiltering = false
@@ -499,6 +864,13 @@ final class YouTubeAPIService: MusicCatalogProviding {
         return tracks
     }
 
+    private func prioritizedLibraryPlaylists(_ playlists: [Playlist]) -> [Playlist] {
+        let deduplicated = deduplicatedPlaylists(playlists)
+        let likedPlaylists = deduplicated.filter { $0.kind == .likedMusic }
+        let remainingPlaylists = deduplicated.filter { $0.kind != .likedMusic }
+        return likedPlaylists + remainingPlaylists
+    }
+
     private func deduplicatedPlaylists(_ playlists: [Playlist]) -> [Playlist] {
         var seenIDs: Set<String> = []
         return playlists.filter { playlist in
@@ -521,6 +893,39 @@ final class YouTubeAPIService: MusicCatalogProviding {
             guard trimmed.isEmpty == false else { return false }
             return seen.insert(trimmed.lowercased()).inserted
         }
+    }
+
+    private func selectSuggestedMixes(from playlists: [Playlist], limit: Int) -> [Playlist] {
+        let candidates = playlists.suggestedMixCandidates()
+        guard candidates.isEmpty == false else { return [] }
+
+        let poolSize = min(candidates.count, max(limit * 2, limit))
+        return Array(candidates.prefix(poolSize).shuffled().prefix(limit))
+    }
+
+    private func randomizedTracks(from tracks: [Track], limit: Int) -> [Track] {
+        guard tracks.isEmpty == false else { return [] }
+        return Array(tracks.shuffled().prefix(limit))
+    }
+
+    private func trackIdentifier(_ track: Track) -> String {
+        track.youtubeVideoID ?? track.id
+    }
+
+    private func makeLikedMusicPlaylist(
+        from tracks: [Track],
+        fallbackPlaylist: Playlist? = nil
+    ) -> Playlist? {
+        guard tracks.isEmpty == false || fallbackPlaylist != nil else { return nil }
+
+        return Playlist(
+            id: fallbackPlaylist?.id ?? likedMusicPlaylistID,
+            title: "Liked Songs",
+            description: "Music-only items from your likes",
+            artworkURL: tracks.first?.artworkURL ?? fallbackPlaylist?.artworkURL,
+            itemCount: max(tracks.count, fallbackPlaylist?.itemCount ?? 0),
+            kind: .likedMusic
+        )
     }
 
     private func decodeResponse<T: Decodable>(_ type: T.Type, from data: Data, response: URLResponse) throws -> T {

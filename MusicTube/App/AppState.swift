@@ -14,15 +14,20 @@ final class AppState: ObservableObject {
     @Published private(set) var featuredTracks: [Track] = []
     @Published private(set) var recentTracks: [Track] = []
     @Published private(set) var playlists: [Playlist] = []
+    @Published private(set) var suggestedMixes: [Playlist] = []
     @Published var searchResults: [Track] = []
     @Published var nowPlaying: Track?
     @Published var isPlaying: Bool = false
     @Published var searchQuery: String = ""
+    @Published private(set) var isSearching: Bool = false
     @Published var isLoading: Bool = false
     @Published var isLoadingPlaylists: Bool = false
     @Published var isPlayerPresented: Bool = false
     @Published var isPreparingPlayback: Bool = false
     @Published var errorMessage: String?
+    @Published private(set) var homeStatusMessage: String?
+    @Published private(set) var libraryStatusMessage: String?
+    @Published private(set) var likedTrackIDs: Set<String> = []
     @Published private(set) var hasNextTrack: Bool = false
     @Published private(set) var hasPreviousTrack: Bool = false
     @Published private(set) var hasLoadedHome = false
@@ -32,18 +37,25 @@ final class AppState: ObservableObject {
     private let authService: AuthProviding
     private let catalogService: MusicCatalogProviding
     private let playbackService: PlaybackService
+    private let localMusicProfileStore: LocalMusicProfileStore
     private var playlistCache: [String: [Track]] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private var isRefreshingDashboard = false
+    private var activeSearchRequestID: UUID?
+    private let localLikedPlaylistID = "local-liked-songs"
+    private let localReplayMixPlaylistID = "local-replay-mix"
+    private let localFavoritesMixPlaylistID = "local-favorites-mix"
 
     init(
         authService: AuthProviding,
         catalogService: MusicCatalogProviding,
-        playbackService: PlaybackService
+        playbackService: PlaybackService,
+        localMusicProfileStore: LocalMusicProfileStore = .shared
     ) {
         self.authService = authService
         self.catalogService = catalogService
         self.playbackService = playbackService
+        self.localMusicProfileStore = localMusicProfileStore
 
         playbackService.$nowPlaying
             .receive(on: DispatchQueue.main)
@@ -92,7 +104,23 @@ final class AppState: ObservableObject {
     }
 
     var homeMixAlbums: [Playlist] {
-        playlists.mixAlbumCandidates()
+        suggestedMixes
+    }
+
+    var likedSongsPlaylist: Playlist? {
+        playlists.first(where: { $0.kind == .likedMusic })
+    }
+
+    var libraryPlaylists: [Playlist] {
+        playlists.filter { $0.kind != .likedMusic }
+    }
+
+    var isUsingLocalLibraryFallback: Bool {
+        playlists.contains(where: { $0.id.hasPrefix("local-") })
+    }
+
+    func isTrackLiked(_ track: Track) -> Bool {
+        likedTrackIDs.contains(trackIdentifier(track))
     }
 
     func signIn() async {
@@ -103,6 +131,7 @@ final class AppState: ObservableObject {
             let session = try await authService.signIn()
             self.session = session
             self.user = session.user
+            syncLocalMusicProfileState()
             authState = .signedIn
             await refreshDashboard()
         } catch {
@@ -119,13 +148,19 @@ final class AppState: ObservableObject {
         featuredTracks = []
         recentTracks = []
         playlists = []
+        suggestedMixes = []
         searchResults = []
         nowPlaying = nil
         isPlaying = false
         isPlayerPresented = false
+        isSearching = false
         isPreparingPlayback = false
         playlistCache = [:]
+        activeSearchRequestID = nil
         errorMessage = nil
+        homeStatusMessage = nil
+        libraryStatusMessage = nil
+        likedTrackIDs = []
         hasLoadedHome = false
         hasLoadedLibrary = false
         isRefreshingDashboard = false
@@ -152,20 +187,39 @@ final class AppState: ObservableObject {
             hasLoadedHome = true
         }
 
+        var remoteHomeError: Error?
+
+        do {
+            let home = try await catalogService.loadHome(accessToken: accessToken)
+            if home.featured.isEmpty == false || home.recent.isEmpty == false {
+                featuredTracks = home.featured
+                recentTracks = home.recent
+                homeStatusMessage = nil
+                await rebuildSuggestedMixes()
+                AppContainer.shared.carPlayManager?.refresh(using: self)
+                return
+            }
+        } catch {
+            remoteHomeError = error
+        }
+
         if await buildHomeFromLoadedLibrary() {
-            errorMessage = nil
+            homeStatusMessage = nil
             AppContainer.shared.carPlayManager?.refresh(using: self)
             return
         }
 
-        do {
-            let home = try await catalogService.loadHome(accessToken: accessToken)
-            featuredTracks = home.featured
-            recentTracks = home.recent
-            errorMessage = nil
-            AppContainer.shared.carPlayManager?.refresh(using: self)
-        } catch {
-            errorMessage = error.localizedDescription
+        featuredTracks = []
+        recentTracks = []
+        suggestedMixes = []
+        playlistCache = playlistCache.filter { isSyntheticMixID($0.key) == false }
+
+        if let remoteHomeError {
+            homeStatusMessage = friendlyLibraryMessage(for: remoteHomeError)
+        } else if let libraryStatusMessage, libraryStatusMessage.isEmpty == false {
+            homeStatusMessage = libraryStatusMessage
+        } else {
+            homeStatusMessage = "Search and play a few songs to build your MusicTube For You picks."
         }
     }
 
@@ -178,22 +232,38 @@ final class AppState: ObservableObject {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.isEmpty {
-            searchResults = []
+            clearSearch()
             return []
         }
 
+        let requestID = UUID()
+        activeSearchRequestID = requestID
+        isSearching = true
+
         do {
             let results = try await catalogService.search(query: trimmed, accessToken: accessToken)
+            guard activeSearchRequestID == requestID else { return results }
             searchResults = results
+            isSearching = false
             errorMessage = nil
             return results
         } catch {
+            guard activeSearchRequestID == requestID else { return [] }
+            searchResults = []
+            isSearching = false
             errorMessage = error.localizedDescription
             return []
         }
     }
 
+    func clearSearch() {
+        activeSearchRequestID = nil
+        isSearching = false
+        searchResults = []
+    }
+
     func play(track: Track, queue: [Track]? = nil) {
+        recordLocalPlayback(for: track)
         playbackService.play(track: track, queue: queue)
         AppContainer.shared.carPlayManager?.refresh(using: self)
     }
@@ -219,17 +289,39 @@ final class AppState: ObservableObject {
 
         do {
             let loadedPlaylists = try await catalogService.loadPlaylists(accessToken: accessToken)
-            let validPlaylistIDs = Set(loadedPlaylists.map(\.id))
-            playlists = loadedPlaylists
+            let prioritizedPlaylists = mergedLibraryPlaylists(remotePlaylists: loadedPlaylists)
+            let validPlaylistIDs = Set(prioritizedPlaylists.map(\.id) + suggestedMixes.map(\.id))
+            playlists = prioritizedPlaylists
             playlistCache = playlistCache.filter { validPlaylistIDs.contains($0.key) }
-            errorMessage = nil
+            libraryStatusMessage = prioritizedPlaylists.isEmpty
+                ? "Search and play songs to build your MusicTube library."
+                : nil
             AppContainer.shared.carPlayManager?.refresh(using: self)
         } catch {
-            errorMessage = error.localizedDescription
+            let localPlaylists = mergedLibraryPlaylists(remotePlaylists: [])
+            playlists = localPlaylists
+            let validPlaylistIDs = Set(localPlaylists.map(\.id) + suggestedMixes.map(\.id))
+            playlistCache = playlistCache.filter { validPlaylistIDs.contains($0.key) }
+            libraryStatusMessage = localPlaylists.isEmpty
+                ? "YouTube library sync is unavailable right now. Search and play songs to build your MusicTube library."
+                : friendlyLibraryMessage(for: error)
         }
     }
 
     func loadPlaylistItems(for playlist: Playlist, forceRefresh: Bool = false) async -> [Track] {
+        if isSyntheticMixID(playlist.id) || isLocalCollectionID(playlist.id) {
+            if let cached = playlistCache[playlist.id] {
+                return cached
+            }
+
+            if isLocalCollectionID(playlist.id) {
+                _ = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
+            } else {
+                await rebuildSuggestedMixes()
+            }
+            return playlistCache[playlist.id] ?? []
+        }
+
         if forceRefresh == false, let cached = playlistCache[playlist.id] {
             return cached
         }
@@ -274,6 +366,7 @@ final class AppState: ObservableObject {
         if let restored = await authService.restoreSession() {
             session = restored
             user = restored.user
+            syncLocalMusicProfileState()
             authState = .signedIn
             await refreshDashboard()
         } else {
@@ -284,11 +377,12 @@ final class AppState: ObservableObject {
     private func buildHomeFromLoadedLibrary() async -> Bool {
         guard playlists.isEmpty == false else { return false }
 
-        let likedPlaylist = playlists.first(where: { $0.kind == .likedMusic })
+        let likedPlaylist = likedSongsPlaylist
+        let candidateMixes = selectSuggestedMixSourcePlaylists(from: playlists)
         let likedPlaylistID = likedPlaylist?.id
-        let mixAlbums = homeMixAlbums
+        let mixAlbums = candidateMixes
             .filter { $0.id != likedPlaylistID }
-            .prefix(4)
+            .prefix(6)
 
         guard likedPlaylist != nil || mixAlbums.isEmpty == false else {
             return false
@@ -304,11 +398,24 @@ final class AppState: ObservableObject {
         var mixTracks: [Track] = []
         for playlist in mixAlbums {
             let tracks = await loadPlaylistItems(for: playlist)
-            mixTracks.append(contentsOf: Array(tracks.prefix(8)))
+            mixTracks.append(contentsOf: randomizedTracks(from: tracks, limit: 12))
         }
 
-        let featured = Array(deduplicatedTracks(likedTracks + mixTracks).prefix(25))
-        let recent = Array(deduplicatedTracks(mixTracks + likedTracks).prefix(15))
+        let featuredPool = deduplicatedTracks(
+            randomizedTracks(from: likedTracks, limit: 30) + mixTracks.shuffled()
+        )
+
+        guard featuredPool.isEmpty == false else {
+            return false
+        }
+
+        let featured = Array(featuredPool.prefix(24))
+        let featuredIDs = Set(featured.map(trackIdentifier))
+        let recent = Array(
+            deduplicatedTracks(mixTracks.shuffled() + likedTracks.shuffled())
+                .filter { featuredIDs.contains(trackIdentifier($0)) == false }
+                .prefix(24)
+        )
 
         guard featured.isEmpty == false || recent.isEmpty == false else {
             return false
@@ -316,15 +423,234 @@ final class AppState: ObservableObject {
 
         featuredTracks = featured
         recentTracks = recent
+        await rebuildSuggestedMixes()
         return true
     }
 
     private func deduplicatedTracks(_ tracks: [Track]) -> [Track] {
         var seenTrackIDs: Set<String> = []
         return tracks.filter { track in
-            let identifier = track.youtubeVideoID ?? track.id
+            let identifier = trackIdentifier(track)
             return seenTrackIDs.insert(identifier).inserted
         }
+    }
+
+    private func prioritizeLibraryPlaylists(_ playlists: [Playlist]) -> [Playlist] {
+        let likedPlaylists = playlists.filter { $0.kind == .likedMusic }
+        let remainingPlaylists = playlists.filter { $0.kind != .likedMusic }
+        return likedPlaylists + remainingPlaylists
+    }
+
+    private func selectSuggestedMixSourcePlaylists(from playlists: [Playlist], limit: Int = 8) -> [Playlist] {
+        let candidates = playlists.suggestedMixCandidates()
+        guard candidates.isEmpty == false else { return [] }
+
+        let poolSize = min(candidates.count, max(limit * 2, limit))
+        return Array(candidates.prefix(poolSize).shuffled().prefix(limit))
+    }
+
+    private func randomizedTracks(from tracks: [Track], limit: Int) -> [Track] {
+        guard tracks.isEmpty == false else { return [] }
+        return Array(tracks.shuffled().prefix(limit))
+    }
+
+    private func trackIdentifier(_ track: Track) -> String {
+        track.youtubeVideoID ?? track.id
+    }
+
+    private var currentProfileID: String {
+        user?.id ?? "guest"
+    }
+
+    private func isSyntheticMixID(_ playlistID: String) -> Bool {
+        playlistID.hasPrefix("suggested-mix-")
+    }
+
+    private func isLocalCollectionID(_ playlistID: String) -> Bool {
+        playlistID.hasPrefix("local-")
+    }
+
+    private func syncLocalMusicProfileState() {
+        let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
+        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+    }
+
+    private func recordLocalPlayback(for track: Track) {
+        let _ = localMusicProfileStore.recordPlayback(of: track, for: currentProfileID)
+        likedTrackIDs = Set(localMusicProfileStore.snapshot(for: currentProfileID).likedTracks.map(trackIdentifier))
+
+        if libraryStatusMessage != nil || playlists.isEmpty || playlists.contains(where: { isLocalCollectionID($0.id) }) {
+            playlists = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
+            libraryStatusMessage = playlists.isEmpty
+                ? "Search and play songs to build your MusicTube library."
+                : "Using your MusicTube activity while YouTube library sync is unavailable."
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.homeStatusMessage != nil || self.featuredTracks.isEmpty {
+                if await self.buildHomeFromLoadedLibrary() {
+                    self.homeStatusMessage = nil
+                    AppContainer.shared.carPlayManager?.refresh(using: self)
+                }
+            }
+        }
+    }
+
+    func toggleLike(for track: Track) {
+        let snapshot = localMusicProfileStore.toggleLike(for: track, profileID: currentProfileID)
+        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+        playlists = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
+
+        if libraryStatusMessage != nil || playlists.isEmpty {
+            libraryStatusMessage = playlists.isEmpty
+                ? "Tap the heart on a song to start building your Liked Songs."
+                : "Using your MusicTube activity while YouTube library sync is unavailable."
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.featuredTracks.isEmpty || self.homeStatusMessage != nil || self.likedSongsPlaylist?.id == self.localLikedPlaylistID {
+                if await self.buildHomeFromLoadedLibrary() {
+                    self.homeStatusMessage = nil
+                    AppContainer.shared.carPlayManager?.refresh(using: self)
+                }
+            }
+        }
+    }
+
+    private func mergedLibraryPlaylists(remotePlaylists: [Playlist]) -> [Playlist] {
+        let remoteCollections = remotePlaylists.filter { isLocalCollectionID($0.id) == false }
+        let hasRemoteLikedSongs = remoteCollections.contains(where: { $0.kind == .likedMusic })
+        let localCollections = buildLocalProfilePlaylists(includeLikedSongs: hasRemoteLikedSongs == false)
+        return prioritizeLibraryPlaylists(remoteCollections + localCollections)
+    }
+
+    private func buildLocalProfilePlaylists(includeLikedSongs: Bool) -> [Playlist] {
+        let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
+        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+
+        var collections: [Playlist] = []
+
+        if includeLikedSongs, snapshot.likedTracks.isEmpty == false {
+            let likedTracks = Array(snapshot.likedTracks.prefix(100))
+            playlistCache[localLikedPlaylistID] = likedTracks
+            collections.append(
+                Playlist(
+                    id: localLikedPlaylistID,
+                    title: "Liked Songs",
+                    description: "Saved in MusicTube",
+                    artworkURL: likedTracks.first?.artworkURL,
+                    itemCount: likedTracks.count,
+                    kind: .likedMusic
+                )
+            )
+        } else {
+            playlistCache.removeValue(forKey: localLikedPlaylistID)
+        }
+
+        if snapshot.recentTracks.isEmpty == false {
+            let replayTracks = Array(snapshot.recentTracks.prefix(60))
+            playlistCache[localReplayMixPlaylistID] = replayTracks
+            collections.append(
+                Playlist(
+                    id: localReplayMixPlaylistID,
+                    title: "Replay Mix",
+                    description: "Built from your recent MusicTube plays",
+                    artworkURL: replayTracks.first?.artworkURL,
+                    itemCount: replayTracks.count,
+                    kind: .standard
+                )
+            )
+        } else {
+            playlistCache.removeValue(forKey: localReplayMixPlaylistID)
+        }
+
+        let favoriteTracks = Array(deduplicatedTracks(snapshot.likedTracks + snapshot.topTracks).prefix(60))
+        if favoriteTracks.isEmpty == false {
+            playlistCache[localFavoritesMixPlaylistID] = favoriteTracks
+            collections.append(
+                Playlist(
+                    id: localFavoritesMixPlaylistID,
+                    title: "Favorites Mix",
+                    description: "Made from the tracks you come back to most",
+                    artworkURL: favoriteTracks.first?.artworkURL,
+                    itemCount: favoriteTracks.count,
+                    kind: .standard
+                )
+            )
+        } else {
+            playlistCache.removeValue(forKey: localFavoritesMixPlaylistID)
+        }
+
+        return collections
+    }
+
+    private func friendlyLibraryMessage(for error: Error) -> String {
+        let message = error.localizedDescription.lowercased()
+
+        if message.contains("quota") {
+            let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
+            if snapshot.hasContent {
+                return "Using your MusicTube activity while YouTube library sync is temporarily unavailable."
+            }
+
+            return "YouTube library sync is temporarily unavailable. Search and play songs to build your MusicTube library."
+        }
+
+        return error.localizedDescription
+    }
+
+    private func rebuildSuggestedMixes() async {
+        let likedTracks: [Track]
+        if let likedSongsPlaylist {
+            likedTracks = await loadPlaylistItems(for: likedSongsPlaylist)
+        } else {
+            likedTracks = []
+        }
+        let sourcePlaylists = selectSuggestedMixSourcePlaylists(from: playlists, limit: 4)
+
+        var sourcePools: [[Track]] = []
+        if featuredTracks.isEmpty == false || recentTracks.isEmpty == false {
+            sourcePools.append(deduplicatedTracks(featuredTracks.shuffled() + recentTracks.shuffled()))
+        }
+        if likedTracks.isEmpty == false {
+            sourcePools.append(deduplicatedTracks(likedTracks.shuffled() + featuredTracks.shuffled()))
+        }
+
+        for playlist in sourcePlaylists {
+            let tracks = await loadPlaylistItems(for: playlist)
+            guard tracks.isEmpty == false else { continue }
+            sourcePools.append(deduplicatedTracks(tracks.shuffled() + recentTracks.shuffled()))
+        }
+
+        let mixTitles = [
+            "Daily Mix 1",
+            "Daily Mix 2",
+            "Replay Mix",
+            "Discovery Mix",
+            "Favorites Mix",
+            "Late Night Mix"
+        ]
+
+        let mixes = Array(sourcePools.prefix(mixTitles.count).enumerated()).compactMap { index, pool -> Playlist? in
+            let tracks = Array(deduplicatedTracks(pool).prefix(25))
+            guard tracks.isEmpty == false else { return nil }
+
+            let mixID = "suggested-mix-\(index + 1)"
+            playlistCache[mixID] = tracks
+
+            return Playlist(
+                id: mixID,
+                title: mixTitles[index],
+                description: "Made for you",
+                artworkURL: tracks.first?.artworkURL,
+                itemCount: tracks.count,
+                kind: .standard
+            )
+        }
+
+        suggestedMixes = mixes
     }
 }
 

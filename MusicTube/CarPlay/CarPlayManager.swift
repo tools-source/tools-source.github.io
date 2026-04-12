@@ -105,22 +105,22 @@ final class CarPlayManager: NSObject {
         }
 
         let mixItems: [CPListItem]
-        if appState.homeMixAlbums.isEmpty, appState.isLoadingPlaylists {
-            mixItems = [messageItem(title: "Loading mix albums...")]
-        } else if appState.homeMixAlbums.isEmpty {
+        if appState.suggestedMixes.isEmpty, appState.isLoadingPlaylists {
+            mixItems = [messageItem(title: "Building suggested mixes...")]
+        } else if appState.suggestedMixes.isEmpty {
             mixItems = [
                 messageItem(
-                    title: "No mix albums yet",
-                    detailText: "Your playlists and collections will show up here."
+                    title: "No suggested mixes yet",
+                    detailText: "Refresh on your iPhone after your library finishes loading."
                 )
             ]
         } else {
-            mixItems = appState.homeMixAlbums.map { playlistItem(for: $0, appState: appState) }
+            mixItems = appState.suggestedMixes.map { playlistItem(for: $0, appState: appState) }
         }
 
         return [
             section(header: "For You", items: featuredItems),
-            section(header: "Mix Albums", items: mixItems)
+            section(header: "Suggested Mixes", items: mixItems)
         ]
     }
 
@@ -150,21 +150,32 @@ final class CarPlayManager: NSObject {
             )
         }
 
-        let playlistItems: [CPListItem]
         if appState.playlists.isEmpty, appState.isLoadingPlaylists {
-            playlistItems = [messageItem(title: "Importing collections...")]
-        } else if appState.playlists.isEmpty {
+            sections.append(section(header: "Library", items: [messageItem(title: "Importing collections...")]))
+            return sections
+        }
+
+        let likedSongsItems: [CPListItem]
+        if let likedSongsPlaylist = appState.likedSongsPlaylist {
+            likedSongsItems = [playlistItem(for: likedSongsPlaylist, appState: appState)]
+        } else {
+            likedSongsItems = [messageItem(title: "No liked songs found yet")]
+        }
+
+        let playlistItems: [CPListItem]
+        if appState.libraryPlaylists.isEmpty {
             playlistItems = [
                 messageItem(
-                    title: "No playlists or liked collections found",
+                    title: "No playlists found",
                     detailText: "Refresh the library on the phone to try again."
                 )
             ]
         } else {
-            playlistItems = appState.playlists.map { playlistItem(for: $0, appState: appState) }
+            playlistItems = appState.libraryPlaylists.map { playlistItem(for: $0, appState: appState) }
         }
 
-        sections.append(section(header: "All Collections", items: playlistItems))
+        sections.append(section(header: "Liked Songs", items: likedSongsItems))
+        sections.append(section(header: "Playlists", items: playlistItems))
         return sections
     }
 
@@ -260,7 +271,7 @@ final class CarPlayManager: NSObject {
     private func playlistSubtitle(for playlist: Playlist) -> String {
         switch playlist.kind {
         case .likedMusic:
-            return "Music only"
+            return playlist.itemCount == 1 ? "1 song" : "\(playlist.itemCount) songs"
         case .uploads:
             return playlist.itemCount == 1 ? "1 upload" : "\(playlist.itemCount) uploads"
         case .standard:
