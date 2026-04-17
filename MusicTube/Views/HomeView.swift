@@ -31,18 +31,13 @@ struct HomeView: View {
                     filterChips
                         .padding(.bottom, 24)
 
-                    if selectedFilter == .all || selectedFilter == .recent {
-                        continueListeningSection
+                    if selectedFilter == .all || selectedFilter == .playlists {
+                        mixesSection
                             .padding(.bottom, 28)
                     }
 
                     if selectedFilter == .all || selectedFilter == .arabic || selectedFilter == .worship || selectedFilter == .recent {
                         recommendedSection
-                            .padding(.bottom, 28)
-                    }
-
-                    if selectedFilter == .all || selectedFilter == .playlists {
-                        mixesSection
                             .padding(.bottom, 28)
                     }
                 }
@@ -652,39 +647,13 @@ private extension Track {
 
 private struct HomeTrackButtons: View {
     @EnvironmentObject private var appState: AppState
-    @StateObject private var downloadService = DownloadService.shared
-
     let track: Track
     let onPlay: () -> Void
     var buttonSize: CGFloat = 36
 
     var body: some View {
         HStack(spacing: 8) {
-            Button {
-                appState.downloadTrack(track)
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color.white.opacity(0.10))
-
-                    if downloadService.isDownloading(track) {
-                        ProgressView()
-                            .scaleEffect(0.75)
-                            .tint(.white)
-                    } else if downloadService.isDownloaded(track) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.cyan)
-                    } else {
-                        Image(systemName: "arrow.down.circle")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                    }
-                }
-                .frame(width: buttonSize, height: buttonSize)
-            }
-            .buttonStyle(.plain)
-            .disabled(downloadService.isDownloading(track) || downloadService.isDownloaded(track))
+            DownloadButton(track: track, size: buttonSize)
 
             Button(action: handlePlaybackButtonTap) {
                 Image(systemName: isCurrentTrack && appState.isPlaying ? "pause.fill" : "play.fill")

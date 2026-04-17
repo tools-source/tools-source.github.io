@@ -1,5 +1,57 @@
 import SwiftUI
 
+// MARK: - DownloadButton
+
+struct DownloadButton: View {
+    @EnvironmentObject private var appState: AppState
+    @StateObject private var downloadService = DownloadService.shared
+
+    let track: Track
+    var size: CGFloat = 36
+
+    var body: some View {
+        let downloading = downloadService.isDownloading(track)
+        let downloaded  = downloadService.isDownloaded(track)
+        let progress    = downloadService.downloadProgress(for: track)
+
+        Button {
+            appState.downloadTrack(track)
+        } label: {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+
+                if downloading {
+                    // Background track
+                    Circle()
+                        .stroke(Color.white.opacity(0.15), lineWidth: 2.5)
+                    // Progress arc
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(Color.cyan, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.linear(duration: 0.3), value: progress)
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.7))
+                } else if downloaded {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.cyan)
+                } else {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: size, height: size)
+        }
+        .buttonStyle(.plain)
+        .disabled(downloading || downloaded)
+    }
+}
+
+// MARK: - TrackRowView
+
 struct TrackRowView: View {
     @EnvironmentObject private var appState: AppState
 
@@ -55,31 +107,7 @@ struct TrackRowView: View {
             .buttonStyle(.plain)
 
             if showsDownloadButton {
-                Button {
-                    appState.downloadTrack(track)
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.10))
-
-                        if downloadService.isDownloading(track) {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                                .tint(.white)
-                        } else if downloadService.isDownloaded(track) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.cyan)
-                        } else {
-                            Image(systemName: "arrow.down.circle")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.plain)
-                .disabled(downloadService.isDownloading(track) || downloadService.isDownloaded(track))
+                DownloadButton(track: track, size: 36)
             }
 
             Button(action: handlePlaybackButtonTap) {

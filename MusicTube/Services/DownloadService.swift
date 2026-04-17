@@ -84,6 +84,10 @@ final class DownloadService: NSObject, ObservableObject {
         activeDownloads[trackKey(track)] != nil
     }
 
+    func downloadProgress(for track: Track) -> Double {
+        activeDownloads[trackKey(track)]?.progress ?? 0
+    }
+
     func downloadedRecord(for track: Track) -> DownloadRecord? {
         let key = trackKey(track)
         return downloads.first { trackKey($0.track) == key }

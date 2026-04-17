@@ -31,6 +31,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private var resolveTask: Task<Void, Never>?
     private var artworkLoadTask: Task<Void, Never>?
     private var timeObserverToken: Any?
+    private var isSeekInProgress = false
+    private var chaseTime: CMTime = .zero
+    private var playbackEndWatchdogTask: Task<Void, Never>?
+    private var lastObservedTime: TimeInterval = 0
     private var playbackQueue: [Track] = []
     private var playbackQueueIndex: Int?
     private var itemDidEndObserver: NSObjectProtocol?
@@ -179,6 +183,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackQueueIndex = nil
         stallRecoveryTask?.cancel()
         stallRecoveryTask = nil
+        playbackEndWatchdogTask?.cancel()
+        playbackEndWatchdogTask = nil
         prefetchTasks.values.forEach { $0.cancel() }
         prefetchTasks = [:]
         nowPlayingInfoCenter.nowPlayingInfo = nil
@@ -280,9 +286,27 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         let clampedTime = max(0, min(time, boundedDuration))
         let targetTime = CMTime(seconds: clampedTime, preferredTimescale: 600)
 
-        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        isSeekInProgress = true
+        chaseTime = targetTime
         setCurrentTime(clampedTime, threshold: 0)
         updatePlaybackState()
+        performSeekToChaseTime()
+    }
+
+    private func performSeekToChaseTime() {
+        guard let player else { isSeekInProgress = false; return }
+        let seekTarget = chaseTime
+        player.seek(to: seekTarget, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if CMTimeCompare(seekTarget, self.chaseTime) == 0 {
+                    self.isSeekInProgress = false
+                    self.lastObservedTime = CMTimeGetSeconds(seekTarget)
+                } else {
+                    self.performSeekToChaseTime()
+                }
+            }
+        }
     }
 
     private func configureAudioSession() {
@@ -413,6 +437,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         playbackStartupTask = nil
         stallRecoveryTask?.cancel()
         stallRecoveryTask = nil
+        playbackEndWatchdogTask?.cancel()
+        playbackEndWatchdogTask = nil
+        isSeekInProgress = false
         playerItemStatusObservation = nil
         playerItemDurationObservation = nil
         playbackObservation = nil
@@ -607,32 +634,36 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                self?.handlePlaybackEnd()
+            }
+        }
+    }
 
-                switch self.repeatMode {
-                case .one:
-                    self.player?.seek(to: .zero)
-                    self.player?.play()
-                    self.setIsPlaying(true)
-                    self.setCurrentTime(0, threshold: 0)
-                    self.updatePlaybackState()
-                case .all:
-                    if self.hasNextTrack {
-                        self.playNextTrack()
-                    } else if self.playbackQueue.isEmpty == false {
-                        // Wrap around to first track
-                        self.playbackQueueIndex = 0
-                        self.updateQueueState()
-                        self.startPlayback(for: self.playbackQueue[0])
-                    }
-                case .off:
-                    if self.hasNextTrack {
-                        self.playNextTrack()
-                    } else {
-                        self.setIsPlaying(false)
-                        self.updatePlaybackState()
-                    }
-                }
+    private func handlePlaybackEnd() {
+        playbackEndWatchdogTask?.cancel()
+        playbackEndWatchdogTask = nil
+
+        switch repeatMode {
+        case .one:
+            player?.seek(to: .zero)
+            player?.play()
+            setIsPlaying(true)
+            setCurrentTime(0, threshold: 0)
+            updatePlaybackState()
+        case .all:
+            if hasNextTrack {
+                playNextTrack()
+            } else if playbackQueue.isEmpty == false {
+                playbackQueueIndex = 0
+                updateQueueState()
+                startPlayback(for: playbackQueue[0])
+            }
+        case .off:
+            if hasNextTrack {
+                playNextTrack()
+            } else {
+                setIsPlaying(false)
+                updatePlaybackState()
             }
         }
     }
@@ -731,15 +762,20 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
     private func installTimeObserver(on player: AVPlayer) {
         removeTimeObserver()
+        lastObservedTime = 0
 
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak player] time in
+            Task { @MainActor [weak self, weak player] in
+                guard let self, let player else { return }
+                // Discard callbacks from a player that has already been torn down
+                guard self.player === player else { return }
 
                 let updatedTime = CMTimeGetSeconds(time)
-                if updatedTime.isFinite {
+                if !self.isSeekInProgress, updatedTime.isFinite {
                     self.setCurrentTime(max(0, updatedTime))
+                    self.checkForDASHPlaybackEnd(currentTime: updatedTime, player: player)
+                    self.lastObservedTime = updatedTime
                 }
 
                 // Only update duration from the player item if we don't already have a
@@ -755,6 +791,40 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 }
 
                 self.updatePlaybackState()
+            }
+        }
+    }
+
+    /// Watchdog for YouTube DASH audio-only streams whose reported duration is shorter than
+    /// actual playback — `AVPlayerItemDidPlayToEndTime` never fires in that case.
+    /// Detects end-of-stream by checking the playhead has stopped advancing near duration.
+    private func checkForDASHPlaybackEnd(currentTime: TimeInterval, player: AVPlayer) {
+        guard duration > 0, isPlaying else { return }
+        // Only arm the watchdog within the last 5 seconds of reported duration
+        guard currentTime >= duration - 5 else {
+            playbackEndWatchdogTask?.cancel()
+            playbackEndWatchdogTask = nil
+            return
+        }
+        guard playbackEndWatchdogTask == nil else { return }
+
+        playbackEndWatchdogTask = Task { [weak self, weak player] in
+            // Wait two ticks (1 second) then check if playhead has stalled
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard let player else { return }
+
+            let newTime = CMTimeGetSeconds(player.currentTime())
+            let timeAdvanced = abs(newTime - self.lastObservedTime) > 0.1
+            let playerStillThinkingItsPlaying = player.timeControlStatus == .playing || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+
+            if !timeAdvanced, playerStillThinkingItsPlaying {
+                await MainActor.run { [weak self] in
+                    self?.handlePlaybackEnd()
+                }
+            }
+            await MainActor.run { [weak self] in
+                self?.playbackEndWatchdogTask = nil
             }
         }
     }
@@ -803,9 +873,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     private func setCurrentTime(_ newValue: TimeInterval, threshold: TimeInterval = 0.05) {
-        let normalizedValue = max(0, newValue)
-        guard abs(currentTime - normalizedValue) > threshold else { return }
-        currentTime = normalizedValue
+        let clampedValue = duration > 0 ? max(0, min(newValue, duration)) : max(0, newValue)
+        guard abs(currentTime - clampedValue) > threshold else { return }
+        currentTime = clampedValue
     }
 
     private func setDuration(_ newValue: TimeInterval, threshold: TimeInterval = 0.05) {

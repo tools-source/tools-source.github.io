@@ -82,7 +82,7 @@ struct PlayerView: View {
                     .onEnded { value in
                         let dy       = value.translation.height
                         let velocity = value.predictedEndTranslation.height
-                        if dy > 80 || velocity > 300 {
+                        if dy > 36 || velocity > 200 {
                             withAnimation(.easeIn(duration: 0.18)) { dragOffset = 900 }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
                                 appState.dismissPlayer()
