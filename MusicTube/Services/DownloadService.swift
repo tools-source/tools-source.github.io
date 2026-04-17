@@ -20,6 +20,7 @@ struct DownloadRecord: Codable, Identifiable, Sendable {
             title: track.title,
             artist: track.artist,
             artworkURL: track.artworkURL,
+            duration: track.duration,
             youtubeVideoID: track.youtubeVideoID,
             streamURL: localURL
         )

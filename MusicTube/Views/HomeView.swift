@@ -634,7 +634,20 @@ struct TrackListSheet: View {
 // MARK: - Track+formattedDuration
 
 private extension Track {
-    var formattedDuration: String? { nil } // populated by playback; kept as hook
+    var formattedDuration: String? {
+        guard let duration, duration.isFinite, duration > 0 else { return nil }
+
+        let totalSeconds = Int(duration.rounded())
+        let hours = totalSeconds / 3_600
+        let minutes = (totalSeconds % 3_600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+
+        return String(format: "%d:%02d", minutes, seconds)
+    }
 }
 
 private struct HomeTrackButtons: View {

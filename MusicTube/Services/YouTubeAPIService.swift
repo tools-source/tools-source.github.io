@@ -675,6 +675,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         guard !isNonMusicContent(title: rawTitle, channel: rawArtist) else { return nil }
 
         // Filter by duration — music tracks are generally under 12 minutes
+        let parsedDuration = text(from: renderer["lengthText"]).flatMap(parseDurationSeconds)
         if let durationText = text(from: renderer["lengthText"]),
            let seconds = parseDurationSeconds(durationText), seconds > 720 {
             return nil
@@ -689,6 +690,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
             title: title,
             artist: artist,
             artworkURL: artworkURL,
+            duration: parsedDuration.map(TimeInterval.init),
             youtubeVideoID: videoID
         )
     }

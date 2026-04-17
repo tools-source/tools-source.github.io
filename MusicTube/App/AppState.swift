@@ -22,6 +22,7 @@ final class AppState: ObservableObject {
     @Published private(set) var playbackDuration: TimeInterval = 0
     @Published private(set) var playbackProgress: Double = 0
     @Published var searchQuery: String = ""
+    @Published private(set) var recentSearches: [String] = []
     @Published private(set) var isSearching: Bool = false
     @Published var isLoading: Bool = false
     @Published var isLoadingPlaylists: Bool = false
@@ -226,6 +227,7 @@ final class AppState: ObservableObject {
         homeStatusMessage = nil
         libraryStatusMessage = nil
         likedTrackIDs = []
+        recentSearches = []
         hasLoadedHome = false
         hasLoadedLibrary = false
         isRefreshingDashboard = false
@@ -327,6 +329,73 @@ final class AppState: ObservableObject {
         activeSearchRequestID = nil
         isSearching = false
         searchResults = []
+    }
+
+    func recordRecentSearch(_ query: String) {
+        let snapshot = localMusicProfileStore.recordSearch(query, for: currentProfileID)
+        recentSearches = snapshot.recentSearches
+    }
+
+    func removeRecentSearch(_ query: String) {
+        let snapshot = localMusicProfileStore.removeRecentSearch(query, for: currentProfileID)
+        recentSearches = snapshot.recentSearches
+    }
+
+    func recentSearchTrackSuggestions(limit: Int = 18) async -> [Track] {
+        guard let accessToken = session?.accessToken else { return [] }
+
+        let suggestionQueries = Array(recentSearches.prefix(6))
+        guard suggestionQueries.isEmpty == false else { return [] }
+
+        var resultBuckets: [[Track]] = []
+
+        for query in suggestionQueries {
+            guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { continue }
+
+            do {
+                let results = try await catalogService.search(query: query, accessToken: accessToken)
+                let bucket = Array(results.prefix(12))
+                if bucket.isEmpty == false {
+                    resultBuckets.append(bucket)
+                }
+            } catch {
+                continue
+            }
+        }
+
+        guard resultBuckets.isEmpty == false else { return [] }
+
+        var suggestions: [Track] = []
+        var seenTrackIDs: Set<String> = []
+        var bucketOffsets = Array(repeating: 0, count: resultBuckets.count)
+
+        while suggestions.count < limit {
+            var appendedTrackThisRound = false
+
+            for bucketIndex in resultBuckets.indices {
+                while bucketOffsets[bucketIndex] < resultBuckets[bucketIndex].count {
+                    let track = resultBuckets[bucketIndex][bucketOffsets[bucketIndex]]
+                    bucketOffsets[bucketIndex] += 1
+
+                    let identifier = trackIdentifier(track)
+                    guard seenTrackIDs.insert(identifier).inserted else { continue }
+
+                    suggestions.append(track)
+                    appendedTrackThisRound = true
+                    break
+                }
+
+                if suggestions.count >= limit {
+                    break
+                }
+            }
+
+            if appendedTrackThisRound == false {
+                break
+            }
+        }
+
+        return suggestions
     }
 
     func play(track: Track, queue: [Track]? = nil) {
@@ -615,6 +684,7 @@ final class AppState: ObservableObject {
     private func syncLocalMusicProfileState() {
         let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
         likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+        recentSearches = snapshot.recentSearches
     }
 
     private func recordLocalPlayback(for track: Track) {

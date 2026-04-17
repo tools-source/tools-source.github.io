@@ -4,6 +4,7 @@ struct LocalMusicProfileSnapshot {
     let likedTracks: [Track]
     let recentTracks: [Track]
     let topTracks: [Track]
+    let recentSearches: [String]
 
     var hasContent: Bool {
         likedTracks.isEmpty == false || recentTracks.isEmpty == false || topTracks.isEmpty == false
@@ -16,6 +17,22 @@ final class LocalMusicProfileStore {
     private struct StoredProfile: Codable {
         var likedTracks: [Track] = []
         var playRecords: [PlayRecord] = []
+        var recentSearches: [String] = []
+
+        enum CodingKeys: String, CodingKey {
+            case likedTracks
+            case playRecords
+            case recentSearches
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            likedTracks = try container.decodeIfPresent([Track].self, forKey: .likedTracks) ?? []
+            playRecords = try container.decodeIfPresent([PlayRecord].self, forKey: .playRecords) ?? []
+            recentSearches = try container.decodeIfPresent([String].self, forKey: .recentSearches) ?? []
+        }
     }
 
     private struct PlayRecord: Codable {
@@ -111,6 +128,34 @@ final class LocalMusicProfileStore {
         return profiles[profileID]?.likedTracks.contains(where: { trackIdentifier($0) == identifier }) ?? false
     }
 
+    @discardableResult
+    func recordSearch(_ query: String, for profileID: String) -> LocalMusicProfileSnapshot {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.isEmpty == false else {
+            return snapshot(for: profileID)
+        }
+
+        var profile = profiles[profileID] ?? StoredProfile()
+        let normalizedQuery = normalizedSearchQuery(trimmedQuery)
+
+        profile.recentSearches.removeAll { normalizedSearchQuery($0) == normalizedQuery }
+        profile.recentSearches.insert(trimmedQuery, at: 0)
+        profile.recentSearches = Array(profile.recentSearches.prefix(20))
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    @discardableResult
+    func removeRecentSearch(_ query: String, for profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+        let normalizedQuery = normalizedSearchQuery(query)
+        profile.recentSearches.removeAll { normalizedSearchQuery($0) == normalizedQuery }
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
     private func snapshot(from profile: StoredProfile) -> LocalMusicProfileSnapshot {
         let likedTracks = deduplicatedTracks(profile.likedTracks)
         let recentTracks = deduplicatedTracks(
@@ -132,7 +177,13 @@ final class LocalMusicProfileStore {
         return LocalMusicProfileSnapshot(
             likedTracks: Array(likedTracks.prefix(100)),
             recentTracks: Array(recentTracks.prefix(100)),
-            topTracks: Array(topTracks.prefix(100))
+            topTracks: Array(topTracks.prefix(100)),
+            recentSearches: Array(
+                profile.recentSearches
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { $0.isEmpty == false }
+                    .prefix(20)
+            )
         )
     }
 
@@ -145,6 +196,12 @@ final class LocalMusicProfileStore {
 
     private func trackIdentifier(_ track: Track) -> String {
         track.youtubeVideoID ?? track.id
+    }
+
+    private func normalizedSearchQuery(_ query: String) -> String {
+        query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private func persistProfiles() {

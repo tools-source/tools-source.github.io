@@ -19,6 +19,16 @@ public struct Stream: Sendable {
     
     public let bitrate: Int?
     public let averageBitrate: Int?
+
+    /// Authoritative duration in milliseconds straight from YouTube's API response.
+    /// More reliable than reading from the DASH container, which AVFoundation
+    /// misreports as 2× the real value for many m4a/opus audio-only streams.
+    public let approxDurationMs: Int?
+
+    /// Seconds converted from `approxDurationMs`. Nil if YouTube didn't supply it.
+    public var approximateDuration: TimeInterval? {
+        approxDurationMs.map { TimeInterval($0) / 1_000.0 }
+    }
     
     @available(*, deprecated, message: "Might be empty if using remote fetching method. Use `videoCodec`, `audioCodec` or `fileExtension` instead.")
     public let mimeType: String
@@ -67,6 +77,7 @@ public struct Stream: Sendable {
         
         self.bitrate = format.bitrate
         self.averageBitrate = format.averageBitrate
+        self.approxDurationMs = format.approxDurationMs.flatMap { Int($0) }
         self.filesize = format.contentLength.flatMap { Int($0) }
     }
     
@@ -88,6 +99,7 @@ public struct Stream: Sendable {
         
         self.bitrate = remoteStream.videoBitrate ?? remoteStream.audioBitrate
         self.averageBitrate = remoteStream.averageBitrate
+        self.approxDurationMs = nil
         self.filesize = remoteStream.filesize
         
         // Backward compatibility for deprecated `subtype` and `mimeType`

@@ -5,6 +5,7 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
     let title: String
     let artist: String
     let artworkURL: URL?
+    let duration: TimeInterval?
     let youtubeVideoID: String?
     let streamURL: URL?
 
@@ -13,6 +14,7 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
         title: String,
         artist: String,
         artworkURL: URL? = nil,
+        duration: TimeInterval? = nil,
         youtubeVideoID: String? = nil,
         streamURL: URL? = nil
     ) {
@@ -20,6 +22,7 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
         self.title = title
         self.artist = artist
         self.artworkURL = artworkURL
+        self.duration = duration
         self.youtubeVideoID = youtubeVideoID
         self.streamURL = streamURL
     }
