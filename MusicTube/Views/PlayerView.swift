@@ -8,6 +8,7 @@ struct PlayerView: View {
 
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
+    @State private var scrubSafetyTask: Task<Void, Never>?
     @State private var showSleepTimerSheet = false
     @StateObject private var downloadService = DownloadService.shared
 
@@ -214,10 +215,7 @@ struct PlayerView: View {
     private var progressCard: some View {
         VStack(spacing: 12) {
             Slider(
-                value: Binding(
-                    get: { isScrubbing ? scrubPosition : appState.playbackPosition },
-                    set: { scrubPosition = $0 }
-                ),
+                value: $scrubPosition,
                 in: 0...max(appState.playbackDuration, 1),
                 onEditingChanged: handleScrubbingChanged
             )
@@ -455,12 +453,27 @@ struct PlayerView: View {
     // MARK: Helpers
 
     private var displayedPlaybackPosition: TimeInterval {
-        isScrubbing ? scrubPosition : appState.playbackPosition
+        // scrubPosition is always in sync with appState.playbackPosition when not scrubbing
+        // (kept up to date by onChange → syncScrubber), so it's safe to use here always.
+        scrubPosition
     }
 
     private func handleScrubbingChanged(_ editing: Bool) {
+        scrubSafetyTask?.cancel()
         isScrubbing = editing
-        if !editing { appState.seek(to: scrubPosition) }
+
+        if !editing {
+            appState.seek(to: scrubPosition)
+        } else {
+            // Safety net: if onEditingChanged(false) never fires (known SwiftUI Slider bug),
+            // force-reset isScrubbing after 5s so the bar doesn't stay frozen indefinitely.
+            scrubSafetyTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled, isScrubbing else { return }
+                isScrubbing = false
+                appState.seek(to: scrubPosition)
+            }
+        }
     }
 
     private func syncScrubber() {

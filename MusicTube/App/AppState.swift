@@ -153,6 +153,19 @@ final class AppState: ObservableObject {
             .assign(to: \.repeatMode, on: self)
             .store(in: &cancellables)
 
+        // Make appState available to CarPlay immediately — before the SwiftUI
+        // .task modifier runs — so CarPlay doesn't show "sign in" on cold connect.
+        AppContainer.shared.appState = self
+
+        // Refresh CarPlay as soon as sign-in is confirmed so it gets real content.
+        $authState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let self, state == .signedIn else { return }
+                AppContainer.shared.carPlayManager?.refresh(using: self)
+            }
+            .store(in: &cancellables)
+
         Task {
             await restoreSession()
         }
@@ -241,8 +254,13 @@ final class AppState: ObservableObject {
         isRefreshingDashboard = true
         defer { isRefreshingDashboard = false }
 
-        await refreshLibrary()
-        await refreshHome()
+        // Run library and home fetches concurrently — cuts load time roughly in half.
+        // Home's remote fetch is independent of library; if it falls back to the local
+        // library, playlists may not be populated yet, so it will show empty state until
+        // the library fetch also completes (which then calls carPlayManager?.refresh).
+        async let libraryFetch: Void = refreshLibrary()
+        async let homeFetch: Void = refreshHome()
+        _ = await (libraryFetch, homeFetch)
     }
 
     func refreshHome() async {
@@ -262,10 +280,19 @@ final class AppState: ObservableObject {
                 featuredTracks = home.featured
                 recentTracks = home.recent
                 homeStatusMessage = nil
-                // Warm stream cache immediately so first tap plays faster
-                playbackService.prefetchStreams(for: home.featured + home.recent)
-                await rebuildSuggestedMixes()
+                // Show content immediately — mixes and stream prefetch run in the background
+                // so they don't block the UI or compete with the home/library fetches.
                 AppContainer.shared.carPlayManager?.refresh(using: self)
+                Task {
+                    await rebuildSuggestedMixes()
+                    AppContainer.shared.carPlayManager?.refresh(using: self)
+                }
+                Task {
+                    // Delay stream prefetch so it doesn't saturate the network during
+                    // the initial load window (the logs showed it causing 10-15s delays).
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    self.playbackService.prefetchStreams(for: Array((home.featured + home.recent).prefix(3)))
+                }
                 return
             }
         } catch {
@@ -846,13 +873,23 @@ final class AppState: ObservableObject {
     }
 
     private func rebuildSuggestedMixes() async {
-        let likedTracks: [Track]
-        if let likedSongsPlaylist {
-            likedTracks = await loadPlaylistItems(for: likedSongsPlaylist)
-        } else {
-            likedTracks = []
-        }
         let sourcePlaylists = selectSuggestedMixSourcePlaylists(from: playlists, limit: 6)
+
+        // Load liked songs + all source playlists in parallel instead of sequentially.
+        let likedPlaylistSnapshot = likedSongsPlaylist
+        async let likedFetch: [Track] = {
+            if let p = likedPlaylistSnapshot { return await self.loadPlaylistItems(for: p) }
+            return []
+        }()
+        let playlistFetches: [[Track]] = await withTaskGroup(of: [Track].self) { group in
+            for playlist in sourcePlaylists {
+                group.addTask { await self.loadPlaylistItems(for: playlist) }
+            }
+            var results: [[Track]] = []
+            for await tracks in group { results.append(tracks) }
+            return results
+        }
+        let likedTracks = await likedFetch
 
         var sourcePools: [[Track]] = []
         if featuredTracks.isEmpty == false || recentTracks.isEmpty == false {
@@ -862,8 +899,7 @@ final class AppState: ObservableObject {
             sourcePools.append(deduplicatedTracks(likedTracks.shuffled() + featuredTracks.shuffled()))
         }
 
-        for playlist in sourcePlaylists {
-            let tracks = await loadPlaylistItems(for: playlist)
+        for tracks in playlistFetches {
             guard tracks.isEmpty == false else { continue }
             sourcePools.append(deduplicatedTracks(tracks.shuffled() + recentTracks.shuffled()))
         }

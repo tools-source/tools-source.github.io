@@ -19,11 +19,6 @@ final class CarPlayManager: NSObject {
     private var libraryTemplate: CPListTemplate?
     private var downloadsTemplate: CPListTemplate?
     private var tabTemplate: CPTabBarTemplate?
-    private var searchTemplate: CPSearchTemplate?
-
-    // Search state
-    private var searchTracks: [Track] = []
-    private var searchIndex: [String: Track] = [:]
 
     // Artwork cache (URL → 60×60 UIImage)
     private let cache = NSCache<NSURL, UIImage>()
@@ -42,9 +37,6 @@ final class CarPlayManager: NSObject {
         libraryTemplate = nil
         downloadsTemplate = nil
         tabTemplate = nil
-        searchTemplate = nil
-        searchTracks = []
-        searchIndex = [:]
     }
 
     func refresh(using state: AppState) {
@@ -95,15 +87,7 @@ final class CarPlayManager: NSObject {
         self.downloadsTemplate = dl
         self.tabTemplate      = tab
 
-        let search = CPSearchTemplate()
-        search.delegate = self
-        self.searchTemplate = search
-
         ic.setRootTemplate(tab, animated: false, completion: nil)
-
-        // Attach search button to all templates
-        let searchBtn = searchButton()
-        [fy, lib, dl].forEach { $0.trailingNavigationBarButtons = [searchBtn] }
     }
 
     private func makeListTemplate(
@@ -119,7 +103,13 @@ final class CarPlayManager: NSObject {
     // MARK: For You sections
 
     private func forYouSections(_ state: AppState?) -> [CPListSection] {
-        guard let state, state.authState == .signedIn else {
+        guard let state else {
+            return [section("", [plain("Loading your music…")])]
+        }
+        guard state.authState == .signedIn else {
+            if state.authState == .restoring {
+                return [section("", [plain("Loading your music…")])]
+            }
             return [section("", [plain("Open MusicTube on iPhone to sign in.")])]
         }
 
@@ -150,7 +140,13 @@ final class CarPlayManager: NSObject {
     // MARK: Library sections
 
     private func librarySections(_ state: AppState?) -> [CPListSection] {
-        guard let state, state.authState == .signedIn else {
+        guard let state else {
+            return [section("", [plain("Loading your music…")])]
+        }
+        guard state.authState == .signedIn else {
+            if state.authState == .restoring {
+                return [section("", [plain("Loading your music…")])]
+            }
             return [section("", [plain("Open MusicTube on iPhone to sign in.")])]
         }
 
@@ -243,8 +239,6 @@ final class CarPlayManager: NSObject {
         let loading = makeListTemplate(
             title: playlist.title, tabTitle: "", tabImage: nil,
             sections: [section(playlist.title, [plain("Loading tracks…")])])
-        loading.trailingNavigationBarButtons = [searchButton()]
-
         guard ic.topTemplate !== loading else { return }
         ic.pushTemplate(loading, animated: true, completion: nil)
 
@@ -269,18 +263,6 @@ final class CarPlayManager: NSObject {
         guard let ic = interfaceController else { return }
         guard ic.topTemplate !== CPNowPlayingTemplate.shared else { return }
         ic.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
-    }
-
-    // MARK: Search button
-
-    private func searchButton() -> CPBarButton {
-        CPBarButton(image: UIImage(systemName: "magnifyingglass") ?? UIImage()) {
-            [weak self] _ in
-            guard let self, let s = self.searchTemplate,
-                  let ic = self.interfaceController,
-                  ic.topTemplate !== s else { return }
-            ic.pushTemplate(s, animated: true, completion: nil)
-        }
     }
 
     // MARK: Artwork
@@ -365,49 +347,3 @@ final class CarPlayManager: NSObject {
     }
 }
 
-// MARK: - Search
-
-extension CarPlayManager: CPSearchTemplateDelegate {
-
-    func searchTemplate(_ searchTemplate: CPSearchTemplate,
-                        updatedSearchText text: String,
-                        completionHandler: @escaping ([CPListItem]) -> Void) {
-        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let appState, q.count >= 2 else {
-            searchTracks = []; searchIndex = [:]; completionHandler([]); return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self else { completionHandler([]); return }
-            let results = await appState.search(query: q)
-            self.searchTracks = results
-            self.searchIndex  = Dictionary(uniqueKeysWithValues:
-                results.map { ($0.youtubeVideoID ?? $0.id, $0) })
-
-            await self.batchFetch(tracks: Array(results.prefix(20)), playlists: [])
-
-            completionHandler(results.prefix(20).map { t in
-                CPListItem(text: t.title, detailText: t.artist,
-                           image: self.cachedImage(t.artworkURL) ?? self.musicPlaceholder)
-            })
-        }
-    }
-
-    func searchTemplate(_ searchTemplate: CPSearchTemplate,
-                        selectedResult item: CPListItem,
-                        completionHandler: @escaping () -> Void) {
-        completionHandler()
-        guard let appState,
-              let id = item.userInfo as? String ?? {
-                  // fall back to matching by title
-                  searchTracks.first(where: { $0.title == item.text })
-                      .map { $0.youtubeVideoID ?? $0.id }
-              }() else { return }
-        _ = id   // silence warning; use title-based fallback below
-        guard let track = searchTracks.first(where: {
-            $0.title == item.text && $0.artist == item.detailText
-        }) else { return }
-        appState.play(track: track, queue: searchTracks)
-        showNowPlaying()
-    }
-}

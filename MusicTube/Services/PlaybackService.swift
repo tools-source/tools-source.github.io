@@ -31,10 +31,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private var resolveTask: Task<Void, Never>?
     private var artworkLoadTask: Task<Void, Never>?
     private var timeObserverToken: Any?
-    private var isSeekInProgress = false
-    private var chaseTime: CMTime = .zero
     private var playbackEndWatchdogTask: Task<Void, Never>?
     private var lastObservedTime: TimeInterval = 0
+    private var pendingSeekTime: TimeInterval? = nil
     private var playbackQueue: [Track] = []
     private var playbackQueueIndex: Int?
     private var itemDidEndObserver: NSObjectProtocol?
@@ -286,25 +285,18 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         let clampedTime = max(0, min(time, boundedDuration))
         let targetTime = CMTime(seconds: clampedTime, preferredTimescale: 600)
 
-        isSeekInProgress = true
-        chaseTime = targetTime
+        // Update UI immediately so the bar shows the new position right away.
+        pendingSeekTime = clampedTime
         setCurrentTime(clampedTime, threshold: 0)
+        lastObservedTime = clampedTime
         updatePlaybackState()
-        performSeekToChaseTime()
-    }
 
-    private func performSeekToChaseTime() {
-        guard let player else { isSeekInProgress = false; return }
-        let seekTarget = chaseTime
-        player.seek(to: seekTarget, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        // 0.5s tolerance = instant keyframe seek for audio; zero tolerance can take 3–10s
+        // on DASH streams, which froze the bar while audio played from the new position.
+        let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
+        player.seek(to: targetTime, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if CMTimeCompare(seekTarget, self.chaseTime) == 0 {
-                    self.isSeekInProgress = false
-                    self.lastObservedTime = CMTimeGetSeconds(seekTarget)
-                } else {
-                    self.performSeekToChaseTime()
-                }
+                self?.pendingSeekTime = nil
             }
         }
     }
@@ -439,7 +431,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         stallRecoveryTask = nil
         playbackEndWatchdogTask?.cancel()
         playbackEndWatchdogTask = nil
-        isSeekInProgress = false
+        pendingSeekTime = nil
         playerItemStatusObservation = nil
         playerItemDurationObservation = nil
         playbackObservation = nil
@@ -772,10 +764,16 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 guard self.player === player else { return }
 
                 let updatedTime = CMTimeGetSeconds(time)
-                if !self.isSeekInProgress, updatedTime.isFinite {
-                    self.setCurrentTime(max(0, updatedTime))
-                    self.checkForDASHPlaybackEnd(currentTime: updatedTime, player: player)
-                    self.lastObservedTime = updatedTime
+                if updatedTime.isFinite {
+                    // Reject callbacks that would jump the bar backward while a seek is
+                    // in-flight (stale pre-seek position delivered from the observer queue).
+                    if let target = self.pendingSeekTime, updatedTime < target - 1.0 {
+                        // Still mid-seek — keep the already-set pending position on screen.
+                    } else {
+                        self.setCurrentTime(max(0, updatedTime))
+                        self.checkForDASHPlaybackEnd(currentTime: updatedTime, player: player)
+                        self.lastObservedTime = updatedTime
+                    }
                 }
 
                 // Only update duration from the player item if we don't already have a
