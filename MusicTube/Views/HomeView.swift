@@ -363,66 +363,92 @@ private struct FilterChip: View {
 // MARK: - ContinueListeningCard
 
 private struct ContinueListeningCard: View {
+    @EnvironmentObject private var appState: AppState
+
     let track: Track
     let isNew: Bool
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack(alignment: .topLeading) {
-                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
-                        .frame(width: 160, height: 160)
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: onTap) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ZStack(alignment: .topLeading) {
+                        AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
+                            .frame(width: 160, height: 160)
 
-                    if isNew {
-                        Text("NEW")
-                            .font(.caption2.weight(.black))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(
-                                Capsule()
-                                    .fill(Color(red: 1, green: 0.23, blue: 0.42))
-                            )
-                            .padding(8)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(track.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 3) {
-                        Text(track.artist)
-                            .font(.caption)
-                            .foregroundStyle(Color.white.opacity(0.55))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(-1)
-
-                        if let duration = track.formattedDuration {
-                            Text("· \(duration)")
-                                .font(.caption)
-                                .foregroundStyle(Color.white.opacity(0.42))
-                                .fixedSize()
+                        if isNew {
+                            Text("NEW")
+                                .font(.caption2.weight(.black))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Capsule()
+                                        .fill(Color(red: 1, green: 0.23, blue: 0.42))
+                                )
+                                .padding(8)
                         }
                     }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(track.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 3) {
+                            Text(track.artist)
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.55))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .layoutPriority(-1)
+
+                            if let duration = track.formattedDuration {
+                                Text("· \(duration)")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.42))
+                                    .fixedSize()
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                    .padding(.horizontal, 6)
                 }
-                .padding(.top, 8)
-                .padding(.horizontal, 6)
+                .frame(width: 160, alignment: .leading)
             }
-            .frame(width: 160, alignment: .leading)
+            .buttonStyle(.plain)
+
+            HStack(spacing: 8) {
+                if isCurrentlyPlaying {
+                    Label("Playing", systemImage: "speaker.wave.2.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                HomeTrackButtons(track: track, onPlay: onTap, buttonSize: 30)
+            }
+            .padding(.top, 8)
+            .padding(.horizontal, 6)
         }
-        .buttonStyle(.plain)
+    }
+
+    private var isCurrentlyPlaying: Bool {
+        appState.nowPlaying?.playbackKey == track.playbackKey && appState.isPlaying
     }
 }
 
 // MARK: - RecommendedRow
 
 private struct RecommendedRow: View {
+    @EnvironmentObject private var appState: AppState
+
     let track: Track
     let onTap: () -> Void
 
@@ -440,7 +466,17 @@ private struct RecommendedRow: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
 
-                        HStack(spacing: 3) {
+                        HStack(spacing: 4) {
+                            if isCurrentlyPlaying {
+                                Image(systemName: "speaker.wave.2.fill")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+
+                                Text("Playing")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+                            }
+
                             Text(track.artist)
                                 .font(.caption)
                                 .foregroundStyle(Color.white.opacity(0.55))
@@ -462,21 +498,13 @@ private struct RecommendedRow: View {
             }
             .buttonStyle(.plain)
 
-            Menu {
-                Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {}
-                Button("Add to Queue", systemImage: "text.badge.plus") {}
-                Button("Download", systemImage: "arrow.down.circle") {
-                    // download handled externally
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
+            HomeTrackButtons(track: track, onPlay: onTap)
         }
         .padding(.vertical, 8)
+    }
+
+    private var isCurrentlyPlaying: Bool {
+        appState.nowPlaying?.playbackKey == track.playbackKey && appState.isPlaying
     }
 }
 
@@ -527,36 +555,57 @@ struct TrackListSheet: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
                     ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                        Button {
-                            appState.play(track: track, queue: tracks)
-                        } label: {
-                            HStack(spacing: 12) {
-                                Text("\(index + 1)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(Color.white.opacity(0.3))
-                                    .frame(width: 20, alignment: .trailing)
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.play(track: track, queue: tracks)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Text("\(index + 1)")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(Color.white.opacity(0.3))
+                                        .frame(width: 20, alignment: .trailing)
 
-                                AsyncArtworkView(url: track.artworkURL, cornerRadius: 8)
-                                    .frame(width: 44, height: 44)
+                                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 8)
+                                        .frame(width: 44, height: 44)
 
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(track.title)
-                                        .font(.subheadline.weight(.medium))
-                                        .foregroundStyle(.white)
-                                        .lineLimit(1)
-                                    Text(track.artist)
-                                        .font(.caption)
-                                        .foregroundStyle(Color.white.opacity(0.5))
-                                        .lineLimit(1)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(track.title)
+                                            .font(.subheadline.weight(.medium))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+
+                                        HStack(spacing: 4) {
+                                            if appState.nowPlaying?.playbackKey == track.playbackKey && appState.isPlaying {
+                                                Image(systemName: "speaker.wave.2.fill")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+
+                                                Text("Playing")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+                                            }
+
+                                            Text(track.artist)
+                                                .font(.caption)
+                                                .foregroundStyle(Color.white.opacity(0.5))
+                                                .lineLimit(1)
+                                        }
+                                    }
+
+                                    Spacer(minLength: 0)
                                 }
-
-                                Spacer(minLength: 0)
+                                .contentShape(Rectangle())
                             }
-                            .contentShape(Rectangle())
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 9)
+                            .buttonStyle(.plain)
+
+                            HomeTrackButtons(
+                                track: track,
+                                onPlay: { appState.play(track: track, queue: tracks) },
+                                buttonSize: 32
+                            )
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
 
                         if index < tracks.count - 1 {
                             Divider()
@@ -586,6 +635,69 @@ struct TrackListSheet: View {
 
 private extension Track {
     var formattedDuration: String? { nil } // populated by playback; kept as hook
+}
+
+private struct HomeTrackButtons: View {
+    @EnvironmentObject private var appState: AppState
+    @StateObject private var downloadService = DownloadService.shared
+
+    let track: Track
+    let onPlay: () -> Void
+    var buttonSize: CGFloat = 36
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                appState.downloadTrack(track)
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.10))
+
+                    if downloadService.isDownloading(track) {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                            .tint(.white)
+                    } else if downloadService.isDownloaded(track) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.cyan)
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: buttonSize, height: buttonSize)
+            }
+            .buttonStyle(.plain)
+            .disabled(downloadService.isDownloading(track) || downloadService.isDownloaded(track))
+
+            Button(action: handlePlaybackButtonTap) {
+                Image(systemName: isCurrentTrack && appState.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: buttonSize, height: buttonSize)
+                    .background(
+                        Circle()
+                            .fill(Color(red: 1, green: 0.24, blue: 0.43))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var isCurrentTrack: Bool {
+        appState.nowPlaying?.playbackKey == track.playbackKey
+    }
+
+    private func handlePlaybackButtonTap() {
+        if isCurrentTrack {
+            appState.togglePlayback()
+        } else {
+            onPlay()
+        }
+    }
 }
 
 // MARK: - Shimmer

@@ -722,7 +722,28 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     private func setNowPlayingArtwork(_ image: UIImage) {
-        let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        // CarPlay and Lock Screen require a square image with a standard boundsSize.
+        // YouTube thumbnails are 16:9; passing a non-square boundsSize makes CarPlay
+        // silently skip the artwork. Normalize to 600×600 square by center-cropping.
+        let side: CGFloat = 600
+        let squareSize = CGSize(width: side, height: side)
+        let squareImage = UIGraphicsImageRenderer(size: squareSize).image { ctx in
+            let srcRatio = image.size.width / image.size.height
+            let drawRect: CGRect
+            if srcRatio > 1 {
+                // landscape: fit height, center-crop width
+                let w = side * srcRatio
+                drawRect = CGRect(x: -(w - side) / 2, y: 0, width: w, height: side)
+            } else {
+                // portrait or square: fit width, center-crop height
+                let h = side / srcRatio
+                drawRect = CGRect(x: 0, y: -(h - side) / 2, width: side, height: h)
+            }
+            image.draw(in: drawRect)
+        }
+        let artwork = MPMediaItemArtwork(boundsSize: squareSize) { size in
+            UIGraphicsImageRenderer(size: size).image { _ in squareImage.draw(in: CGRect(origin: .zero, size: size)) }
+        }
         var info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
         info[MPMediaItemPropertyArtwork] = artwork
         nowPlayingInfoCenter.nowPlayingInfo = info

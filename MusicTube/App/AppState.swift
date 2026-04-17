@@ -395,14 +395,6 @@ final class AppState: ObservableObject {
             : []
 
         if forceRefresh == false, let cached = playlistCache[playlist.id] {
-            if playlist.kind == .likedMusic {
-                let mergedTracks = mergedLikedSongTracks(remoteTracks: cached, localTracks: localLikedTracks)
-                if mergedTracks != cached {
-                    playlistCache[playlist.id] = mergedTracks
-                }
-                return mergedTracks
-            }
-
             return cached
         }
 
@@ -415,12 +407,9 @@ final class AppState: ObservableObject {
                 for: playlist,
                 accessToken: accessToken
             )
-            let resolvedTracks = playlist.kind == .likedMusic
-                ? mergedLikedSongTracks(remoteTracks: tracks, localTracks: localLikedTracks)
-                : tracks
-            playlistCache[playlist.id] = resolvedTracks
+            playlistCache[playlist.id] = tracks
             errorMessage = nil
-            return resolvedTracks
+            return tracks
         } catch {
             errorMessage = error.localizedDescription
             if playlist.kind == .likedMusic, localLikedTracks.isEmpty == false {
@@ -450,6 +439,11 @@ final class AppState: ObservableObject {
         } else {
             resumePlayback()
         }
+    }
+
+    func closeNowPlaying() {
+        playbackService.stop()
+        isPlayerPresented = false
     }
 
     func dismissPlayer() {
@@ -625,7 +619,6 @@ final class AppState: ObservableObject {
 
     private func recordLocalPlayback(for track: Track) {
         let _ = localMusicProfileStore.recordPlayback(of: track, for: currentProfileID)
-        likedTrackIDs = Set(localMusicProfileStore.snapshot(for: currentProfileID).likedTracks.map(trackIdentifier))
 
         if libraryStatusMessage != nil || playlists.isEmpty || playlists.contains(where: { isLocalCollectionID($0.id) }) {
             playlists = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
@@ -646,45 +639,35 @@ final class AppState: ObservableObject {
     }
 
     func toggleLike(for track: Track) {
-        let snapshot = localMusicProfileStore.toggleLike(for: track, profileID: currentProfileID)
-        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
-        if let likedSongsPlaylistID = likedSongsPlaylist?.id {
-            playlistCache.removeValue(forKey: likedSongsPlaylistID)
-        }
-        playlists = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
+        let shouldLike = likedTrackIDs.contains(trackIdentifier(track)) == false
 
-        if libraryStatusMessage != nil || playlists.isEmpty {
-            libraryStatusMessage = playlists.isEmpty
-                ? "Tap the heart on a song to start building your Liked Songs."
-                : "Using your MusicTube activity while YouTube library sync is unavailable."
+        guard let accessToken = session?.accessToken else {
+            applyLocalLikeState(shouldLike, for: track)
+            return
         }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.featuredTracks.isEmpty || self.homeStatusMessage != nil || self.likedSongsPlaylist?.id == self.localLikedPlaylistID {
-                if await self.buildHomeFromLoadedLibrary() {
-                    self.homeStatusMessage = nil
-                    AppContainer.shared.carPlayManager?.refresh(using: self)
-                }
+
+            do {
+                try await self.catalogService.setLikeStatus(for: track, isLiked: shouldLike, accessToken: accessToken)
+                self.applyLocalLikeState(shouldLike, for: track)
+                self.errorMessage = nil
+            } catch {
+                self.errorMessage = error.localizedDescription
             }
         }
     }
 
     private func mergedLibraryPlaylists(remotePlaylists: [Playlist]) -> [Playlist] {
         let remoteCollections = remotePlaylists.filter { isLocalCollectionID($0.id) == false }
-        let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
-        let mergedRemoteCollections = remoteCollections.map { playlist in
-            guard playlist.kind == .likedMusic else { return playlist }
-            return mergedLikedSongsPlaylist(from: playlist, localTracks: snapshot.likedTracks)
-        }
         let hasRemoteLikedSongs = remoteCollections.contains(where: { $0.kind == .likedMusic })
         let localCollections = buildLocalProfilePlaylists(includeLikedSongs: hasRemoteLikedSongs == false)
-        return prioritizeLibraryPlaylists(mergedRemoteCollections + localCollections)
+        return prioritizeLibraryPlaylists(remoteCollections + localCollections)
     }
 
     private func buildLocalProfilePlaylists(includeLikedSongs: Bool) -> [Playlist] {
         let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
-        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
 
         var collections: [Playlist] = []
 
@@ -757,28 +740,6 @@ final class AppState: ObservableObject {
         return error.localizedDescription
     }
 
-    private func mergedLikedSongTracks(remoteTracks: [Track], localTracks: [Track]) -> [Track] {
-        deduplicatedTracks(localTracks + remoteTracks)
-    }
-
-    private func mergedLikedSongsPlaylist(from remotePlaylist: Playlist, localTracks: [Track]) -> Playlist {
-        let mergedItemCount: Int
-        if let cachedTracks = playlistCache[remotePlaylist.id] {
-            mergedItemCount = mergedLikedSongTracks(remoteTracks: cachedTracks, localTracks: localTracks).count
-        } else {
-            mergedItemCount = max(remotePlaylist.itemCount, localTracks.count)
-        }
-
-        return Playlist(
-            id: remotePlaylist.id,
-            title: remotePlaylist.title,
-            description: remotePlaylist.description,
-            artworkURL: localTracks.first?.artworkURL ?? remotePlaylist.artworkURL,
-            itemCount: mergedItemCount,
-            kind: .likedMusic
-        )
-    }
-
     private func hydrateLikedSongsPlaylistIfNeeded(forceRefresh: Bool) async {
         guard let likedPlaylist = likedSongsPlaylist else {
             syncLocalMusicProfileState()
@@ -786,11 +747,6 @@ final class AppState: ObservableObject {
         }
 
         let tracks = await loadPlaylistItems(for: likedPlaylist, forceRefresh: forceRefresh)
-        guard tracks.isEmpty == false else {
-            syncLocalMusicProfileState()
-            return
-        }
-
         likedTrackIDs = Set(tracks.map(trackIdentifier))
 
         if let playlistIndex = playlists.firstIndex(where: { $0.id == likedPlaylist.id }) {
@@ -798,11 +754,25 @@ final class AppState: ObservableObject {
                 id: likedPlaylist.id,
                 title: likedPlaylist.title,
                 description: likedPlaylist.description,
-                artworkURL: tracks.first?.artworkURL ?? likedPlaylist.artworkURL,
+                artworkURL: tracks.first?.artworkURL ?? (tracks.isEmpty ? nil : likedPlaylist.artworkURL),
                 itemCount: tracks.count,
                 kind: likedPlaylist.kind
             )
         }
+    }
+
+    func refreshLikedSongsPlaylistFromAccount() async {
+        guard let likedPlaylist = likedSongsPlaylist else {
+            syncLocalMusicProfileState()
+            return
+        }
+
+        guard isLocalCollectionID(likedPlaylist.id) == false else {
+            syncLocalMusicProfileState()
+            return
+        }
+
+        await hydrateLikedSongsPlaylistIfNeeded(forceRefresh: true)
     }
 
     private func rebuildSuggestedMixes() async {
@@ -855,6 +825,78 @@ final class AppState: ObservableObject {
         }
 
         suggestedMixes = mixes
+    }
+
+    private func applyLocalLikeState(_ isLiked: Bool, for track: Track) {
+        let _ = localMusicProfileStore.setLike(isLiked, for: track, profileID: currentProfileID)
+        let identifier = trackIdentifier(track)
+        if isLiked {
+            likedTrackIDs.insert(identifier)
+        } else {
+            likedTrackIDs.remove(identifier)
+        }
+        updateLikedSongsPlaylistCache(for: track, isLiked: isLiked)
+        playlists = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
+
+        if libraryStatusMessage != nil || playlists.isEmpty {
+            libraryStatusMessage = playlists.isEmpty
+                ? "Tap the heart on a song to start building your Liked Songs."
+                : "Using your MusicTube activity while YouTube library sync is unavailable."
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.featuredTracks.isEmpty || self.homeStatusMessage != nil || self.likedSongsPlaylist?.id == self.localLikedPlaylistID {
+                if await self.buildHomeFromLoadedLibrary() {
+                    self.homeStatusMessage = nil
+                    AppContainer.shared.carPlayManager?.refresh(using: self)
+                }
+            }
+        }
+    }
+
+    private func updateLikedSongsPlaylistCache(for track: Track, isLiked: Bool) {
+        guard let likedPlaylist = likedSongsPlaylist else { return }
+
+        let playlistID = likedPlaylist.id
+        let identifier = trackIdentifier(track)
+        let cachedTracks = playlistCache[playlistID] ?? []
+        let wasPresent = cachedTracks.contains { trackIdentifier($0) == identifier }
+
+        var updatedTracks = cachedTracks.filter { trackIdentifier($0) != identifier }
+        if isLiked {
+            updatedTracks.insert(track, at: 0)
+        }
+        updatedTracks = deduplicatedTracks(updatedTracks)
+
+        if updatedTracks.isEmpty {
+            playlistCache.removeValue(forKey: playlistID)
+        } else {
+            playlistCache[playlistID] = updatedTracks
+        }
+
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+
+        let countDelta: Int
+        switch (isLiked, wasPresent) {
+        case (true, false):
+            countDelta = 1
+        case (false, true):
+            countDelta = -1
+        default:
+            countDelta = 0
+        }
+
+        let currentPlaylist = playlists[playlistIndex]
+        let updatedCount = max(currentPlaylist.itemCount + countDelta, 0)
+        playlists[playlistIndex] = Playlist(
+            id: currentPlaylist.id,
+            title: currentPlaylist.title,
+            description: currentPlaylist.description,
+            artworkURL: updatedTracks.first?.artworkURL,
+            itemCount: updatedTracks.isEmpty ? updatedCount : updatedTracks.count,
+            kind: currentPlaylist.kind
+        )
     }
 }
 

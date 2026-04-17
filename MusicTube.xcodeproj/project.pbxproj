@@ -20,8 +20,6 @@
 		4E124D5150EE894CA22BCD6B /* RegularExpression.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE599D9DD6668C5B7AECE93 /* RegularExpression.swift */; };
 		52A8BF4C70D154F24576A5B2 /* Lazy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3A06FCFCEFEC571817A0D89 /* Lazy.swift */; };
 		5C190D2DB7FCC2A37C0E03A7 /* PlaybackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3CBFF6921957C90AD8CF475 /* PlaybackService.swift */; };
-		AA11223344556677889900AB /* DownloadService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900AA /* DownloadService.swift */; };
-		BB11223344556677889900AB /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB11223344556677889900AA /* DownloadsView.swift */; };
 		6186BAFBB5E42CAC4B9880E1 /* TrackRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF567E1FBF8942688D4A4890 /* TrackRowView.swift */; };
 		639BD927E404C9B90FB05A58 /* Foundation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 700769B442F1C5192110C331 /* Foundation.swift */; };
 		63B55600269E576AF84D4A87 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D96BC6F301A89834DC712125 /* LibraryView.swift */; };
@@ -45,11 +43,13 @@
 		A47636B4742EF8F8F3877346 /* meriyah.umd.js in Resources */ = {isa = PBXBuildFile; fileRef = B54139D68FDA5C7E9834182C /* meriyah.umd.js */; };
 		A487428AAE14273A4D642310 /* Parser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A02B37D10821A7012FB47B /* Parser.swift */; };
 		A6701A81F8150F6C6A16DFF8 /* YouTube.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4971710D859772FFC099A692 /* YouTube.swift */; };
+		AA11223344556677889900AB /* DownloadService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900AA /* DownloadService.swift */; };
 		AFF2E4ED3E48BD20DA0B538C /* YouTubeEmbedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A6859737CC06335BB2DD33 /* YouTubeEmbedView.swift */; };
 		B0EDB6A70EEEED92D93FD6E2 /* ITag.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6345689CE70EAF0D5CC0BCB /* ITag.swift */; };
 		B1FF189CF435732FD883458E /* Cipher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 967E1328279695A7C502A21F /* Cipher.swift */; };
 		B2F424DCE74244AF9303D144 /* Stream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69668E2B2E512FB30F42BA95 /* Stream.swift */; };
 		B620486218952DBE51E898EB /* InnerTube.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21413508DB64CADC5F20CC8B /* InnerTube.swift */; };
+		BB11223344556677889900AB /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB11223344556677889900AA /* DownloadsView.swift */; };
 		BB2ECFA539674D5F69099576 /* ServiceProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C2549105F6A718CC58A8A7 /* ServiceProtocols.swift */; };
 		BB6366BDA3EFAB0DD3542062 /* MusicTubeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E23D15959B05437D07A7C8 /* MusicTubeApp.swift */; };
 		BD569DE5F701248D7B2AC174 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2082C75FD3E1E6D05253198 /* Assets.xcassets */; };
@@ -100,6 +100,7 @@
 		9CE599D9DD6668C5B7AECE93 /* RegularExpression.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RegularExpression.swift; sourceTree = "<group>"; };
 		A3F24F85D8B3EDC3117841DD /* AppState.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		A75D1F4B72F8E436AF8E7A37 /* Track.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Track.swift; sourceTree = "<group>"; };
+		AA11223344556677889900AA /* DownloadService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DownloadService.swift; sourceTree = "<group>"; };
 		AB9A9899DC92122B9EA55437 /* Extraction.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Extraction.swift; sourceTree = "<group>"; };
 		AE57015E67D384E75CC499AD /* MusicTube.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = MusicTube.entitlements; sourceTree = "<group>"; };
 		AEA42D45F2D74AA4A8E6A9E8 /* MusicTubeSimulator.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = MusicTubeSimulator.entitlements; sourceTree = "<group>"; };
@@ -110,6 +111,7 @@
 		B6633AC703DACDA40978C8A4 /* YouTubeUser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = YouTubeUser.swift; sourceTree = "<group>"; };
 		B706B131F39E77274D429A76 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		B90ED3185B83A85DCF1A2E05 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB11223344556677889900AA /* DownloadsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
 		C2A6859737CC06335BB2DD33 /* YouTubeEmbedView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = YouTubeEmbedView.swift; sourceTree = "<group>"; };
 		CB47D6851D3E4619D7F0BB12 /* YouTubeMetadata.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = YouTubeMetadata.swift; sourceTree = "<group>"; };
 		D1C2549105F6A718CC58A8A7 /* ServiceProtocols.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServiceProtocols.swift; sourceTree = "<group>"; };
@@ -120,8 +122,6 @@
 		E2082C75FD3E1E6D05253198 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E3A06FCFCEFEC571817A0D89 /* Lazy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Lazy.swift; sourceTree = "<group>"; };
 		E3CBFF6921957C90AD8CF475 /* PlaybackService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackService.swift; sourceTree = "<group>"; };
-		AA11223344556677889900AA /* DownloadService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DownloadService.swift; sourceTree = "<group>"; };
-		BB11223344556677889900AA /* DownloadsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
 		E5F35E293677C6B0BE9DDF51 /* RemoteStream.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteStream.swift; sourceTree = "<group>"; };
 		EF567E1FBF8942688D4A4890 /* TrackRowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TrackRowView.swift; sourceTree = "<group>"; };
 		F0A1B2C3D4E5F60718293A4C /* LocalMusicProfileStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalMusicProfileStore.swift; sourceTree = "<group>"; };

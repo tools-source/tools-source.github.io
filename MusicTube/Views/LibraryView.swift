@@ -40,6 +40,12 @@ struct LibraryView: View {
                     await appState.refreshLibrary()
                 }
             }
+            .onAppear {
+                guard appState.hasLoadedLibrary, appState.isLoadingPlaylists == false else { return }
+                Task {
+                    await appState.refreshLikedSongsPlaylistFromAccount()
+                }
+            }
             .background(libraryBackground.ignoresSafeArea())
         }
     }
@@ -247,7 +253,11 @@ struct PlaylistDetailView: View {
                         )
                 } else {
                     ForEach(tracks) { track in
-                        TrackRowView(track: track) {
+                        TrackRowView(
+                            track: track,
+                            showsNowPlayingIndicator: true,
+                            showsDownloadButton: true
+                        ) {
                             appState.play(track: track, queue: tracks)
                         }
                     }
@@ -268,7 +278,10 @@ struct PlaylistDetailView: View {
         .navigationTitle(playlist.title)
         .task {
             guard tracks.isEmpty else { return }
-            tracks = await appState.loadPlaylistItems(for: playlist)
+            tracks = await appState.loadPlaylistItems(
+                for: playlist,
+                forceRefresh: playlist.kind == .likedMusic
+            )
             isLoading = false
         }
         .refreshable {

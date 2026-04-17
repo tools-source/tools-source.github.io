@@ -77,7 +77,8 @@ private struct MainTabView: View {
                     onTap: { appState.isPlayerPresented = true },
                     onPreviousTap: { appState.playPreviousTrack() },
                     onPlayPauseTap: { appState.togglePlayback() },
-                    onNextTap: { appState.playNextTrack() }
+                    onNextTap: { appState.playNextTrack() },
+                    onCloseTap: { appState.closeNowPlaying() }
                 )
                 // Sits just above the tab bar (tab bar ~49pt + safe area handled inside)
                 .padding(.bottom, 49)
@@ -122,6 +123,7 @@ private struct MiniPlayerBar: View {
     let onPreviousTap: () -> Void
     let onPlayPauseTap: () -> Void
     let onNextTap: () -> Void
+    let onCloseTap: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -149,6 +151,17 @@ private struct MiniPlayerBar: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                Button(action: onCloseTap) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 8)
 
                 // Transport controls
                 HStack(spacing: 4) {

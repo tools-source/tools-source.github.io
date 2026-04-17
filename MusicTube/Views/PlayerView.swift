@@ -11,13 +11,18 @@ struct PlayerView: View {
     @State private var showSleepTimerSheet = false
     @StateObject private var downloadService = DownloadService.shared
 
+    /// Tracks how far the user has dragged downward for swipe-to-dismiss.
+    @State private var dragOffset: CGFloat = 0
+
     var body: some View {
         ZStack {
-            // Background fills edge-to-edge behind the status bar
             playerBackground.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 24) {
+                    // Drag handle — swipe down here to dismiss
+                    dragHandle
+
                     header
                     artwork
                     titleArea
@@ -30,11 +35,12 @@ struct PlayerView: View {
                     }
                 }
                 .padding(.horizontal, 24)
-                .padding(.top, 8)   // safe area is now respected by ScrollView
+                .padding(.top, 4)
                 .padding(.bottom, 40)
             }
-            // Let ScrollView respect top safe area so header stays below status bar
         }
+        .offset(y: max(0, dragOffset))
+        .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.7), value: dragOffset)
         .onAppear { syncScrubber() }
         .onChange(of: track.id) { _, _ in syncScrubber() }
         .onChange(of: appState.playbackPosition) { _, _ in
@@ -51,6 +57,44 @@ struct PlayerView: View {
                 .presentationDetents([.height(360)])
                 .presentationDragIndicator(.visible)
         }
+    }
+
+    // Drag-handle — full-width transparent hit area with a visible pill.
+    // The dismiss gesture lives here only, so it never conflicts with the Slider.
+    private var dragHandle: some View {
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .overlay(alignment: .top) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.white.opacity(0.28))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 10)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onChanged { value in
+                        let dy = value.translation.height
+                        guard dy > 0 else { return }
+                        dragOffset = dy
+                    }
+                    .onEnded { value in
+                        let dy       = value.translation.height
+                        let velocity = value.predictedEndTranslation.height
+                        if dy > 80 || velocity > 300 {
+                            withAnimation(.easeIn(duration: 0.18)) { dragOffset = 900 }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                                appState.dismissPlayer()
+                                dismiss()
+                            }
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                dragOffset = 0
+                            }
+                        }
+                    }
+            )
     }
 
     // MARK: Header

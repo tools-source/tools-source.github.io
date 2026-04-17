@@ -33,6 +33,10 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
         guard let youtubeVideoID else { return nil }
         return URL(string: "https://www.youtube.com/embed/\(youtubeVideoID)?playsinline=1&autoplay=1")
     }
+
+    var playbackKey: String {
+        youtubeVideoID ?? id
+    }
 }
 
 enum PlaylistKind: String, Hashable, Sendable {

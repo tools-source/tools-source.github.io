@@ -90,6 +90,22 @@ final class LocalMusicProfileStore {
         return snapshot(from: profile)
     }
 
+    @discardableResult
+    func setLike(_ isLiked: Bool, for track: Track, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+        let identifier = trackIdentifier(track)
+
+        profile.likedTracks.removeAll { trackIdentifier($0) == identifier }
+        if isLiked {
+            profile.likedTracks.insert(track, at: 0)
+        }
+
+        profile.likedTracks = deduplicatedTracks(profile.likedTracks).prefix(200).map { $0 }
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
     func isTrackLiked(_ track: Track, for profileID: String) -> Bool {
         let identifier = trackIdentifier(track)
         return profiles[profileID]?.likedTracks.contains(where: { trackIdentifier($0) == identifier }) ?? false

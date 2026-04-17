@@ -335,25 +335,11 @@ final class YouTubeAPIService: MusicCatalogProviding {
     func loadPlaylistItems(for playlist: Playlist, accessToken: String) async throws -> [Track] {
         if playlist.kind == .likedMusic {
             let relatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
-            do {
-                return try await fetchLikedMusicTracks(
-                    accessToken: accessToken,
-                    relatedPlaylists: relatedPlaylists,
-                    maxItems: 200
-                )
-            } catch {
-                guard playlist.id != likedMusicPlaylistID else {
-                    throw error
-                }
-
-                let fallbackTracks = try await fetchPlaylistItems(
-                    for: playlist,
-                    accessToken: accessToken,
-                    maxItems: 200
-                )
-
-                return (try? await filterMusicTracks(fallbackTracks, accessToken: accessToken)) ?? fallbackTracks
-            }
+            return try await fetchLikedMusicTracks(
+                accessToken: accessToken,
+                relatedPlaylists: relatedPlaylists,
+                maxItems: 200
+            )
         }
 
         return try await fetchPlaylistItems(
@@ -361,6 +347,27 @@ final class YouTubeAPIService: MusicCatalogProviding {
             accessToken: accessToken,
             maxItems: 200
         )
+    }
+
+    func setLikeStatus(for track: Track, isLiked: Bool, accessToken: String) async throws {
+        let videoID = track.youtubeVideoID ?? track.id
+        guard videoID.isEmpty == false else {
+            throw APIError.serviceError("This YouTube item can't be liked right now.")
+        }
+
+        var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/videos/rate")!
+        components.queryItems = authorizedQueryItems(
+            [
+                URLQueryItem(name: "id", value: videoID),
+                URLQueryItem(name: "rating", value: isLiked ? "like" : "none")
+            ]
+        )
+
+        var request = authorizedRequest(url: components.url!, accessToken: accessToken)
+        request.httpMethod = "POST"
+
+        let (data, response) = try await urlSession.data(for: request)
+        try validateStatusCode(for: response, data: data)
     }
 
     private func fetchMostPopularMusic(apiKey: String) async throws -> [Track] {
@@ -399,6 +406,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         var queryItems = [
             URLQueryItem(name: "part", value: "snippet"),
             URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "safeSearch", value: "moderate"),
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "maxResults", value: String(maxResults)),
             URLQueryItem(name: "key", value: apiKey)
@@ -433,6 +441,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         var queryItems = [
             URLQueryItem(name: "part", value: "snippet"),
             URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "safeSearch", value: "moderate"),
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "maxResults", value: String(maxResults))
         ]
@@ -477,7 +486,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
                     query: query,
                     accessToken: accessToken,
                     maxResults: 8,
-                    musicOnly: false
+                    musicOnly: true
                 )
             }
             recommendations.append(contentsOf: results.filter { track in
@@ -552,6 +561,9 @@ final class YouTubeAPIService: MusicCatalogProviding {
             let response = try decodeResponse(VideoMetadataResponse.self, from: data, response: urlResponse)
 
             for item in response.items where item.snippet.categoryID == "10" {
+                let title = item.snippet.title ?? ""
+                let channel = item.snippet.channelTitle ?? ""
+                guard !isNonMusicContent(title: title, channel: channel) else { continue }
                 musicVideoIDs.insert(item.id)
             }
         }
@@ -586,11 +598,12 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func track(from item: VideoItem) -> Track? {
         guard let videoID = item.id.videoID ?? item.id.raw else { return nil }
-
+        let artist = cleanArtistName(item.snippet.channelTitle)
+        let title = cleanTrackTitle(item.snippet.title, channelName: artist)
         return Track(
             id: videoID,
-            title: item.snippet.title,
-            artist: item.snippet.channelTitle,
+            title: title,
+            artist: artist,
             artworkURL: item.snippet.thumbnails.bestURL,
             youtubeVideoID: videoID
         )
@@ -651,12 +664,24 @@ final class YouTubeAPIService: MusicCatalogProviding {
     private func track(fromInnerTubeVideoRenderer renderer: [String: Any]) -> Track? {
         guard let videoID = renderer["videoId"] as? String else { return nil }
 
-        let title = text(from: renderer["title"]) ?? "YouTube Track"
-        let artist =
+        let rawTitle = text(from: renderer["title"]) ?? "YouTube Track"
+        let rawArtist =
             text(from: renderer["longBylineText"]) ??
             text(from: renderer["ownerText"]) ??
             text(from: renderer["shortBylineText"]) ??
             "YouTube"
+
+        // Filter out non-music content (kids, gaming, vlogs, etc.)
+        guard !isNonMusicContent(title: rawTitle, channel: rawArtist) else { return nil }
+
+        // Filter by duration — music tracks are generally under 12 minutes
+        if let durationText = text(from: renderer["lengthText"]),
+           let seconds = parseDurationSeconds(durationText), seconds > 720 {
+            return nil
+        }
+
+        let artist = cleanArtistName(rawArtist)
+        let title = cleanTrackTitle(rawTitle, channelName: artist)
         let artworkURL = bestThumbnailURL(from: renderer["thumbnail"])
 
         return Track(
@@ -780,7 +805,10 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 } else {
                     requiresMusicFiltering = true
                 }
-
+                // Heuristic filter: catches kids content (e.g., Cocomelon) that has categoryId=10
+                guard !isNonMusicContent(title: item.snippet.title, channel: item.snippet.channelTitle) else {
+                    return nil
+                }
                 return track(from: item)
             }
 
@@ -857,14 +885,16 @@ final class YouTubeAPIService: MusicCatalogProviding {
         let tracks: [Track] = entries.prefix(maxItems).compactMap { item in
             guard let videoID = item.snippet.resourceID?.videoID else { return nil }
 
-            let artistName = item.snippet.videoOwnerChannelTitle ??
+            let rawArtist = item.snippet.videoOwnerChannelTitle ??
                 item.snippet.channelTitle ??
                 "YouTube"
+            let artist = cleanArtistName(rawArtist)
+            let title = cleanTrackTitle(item.snippet.title, channelName: artist)
 
             return Track(
                 id: item.id,
-                title: item.snippet.title,
-                artist: artistName,
+                title: title,
+                artist: artist,
                 artworkURL: item.snippet.thumbnails?.bestURL,
                 youtubeVideoID: videoID
             )
@@ -938,6 +968,12 @@ final class YouTubeAPIService: MusicCatalogProviding {
     }
 
     private func decodeResponse<T: Decodable>(_ type: T.Type, from data: Data, response: URLResponse) throws -> T {
+        try validateStatusCode(for: response, data: data)
+
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func validateStatusCode(for response: URLResponse, data: Data) throws {
         if let apiError = try? JSONDecoder().decode(GoogleAPIErrorEnvelope.self, from: data),
            let message = apiError.error?.message,
            message.isEmpty == false {
@@ -948,8 +984,6 @@ final class YouTubeAPIService: MusicCatalogProviding {
            (200 ..< 300).contains(httpResponse.statusCode) == false {
             throw APIError.serviceError("YouTube returned status \(httpResponse.statusCode).")
         }
-
-        return try JSONDecoder().decode(type, from: data)
     }
 }
 
@@ -989,9 +1023,13 @@ private struct VideoMetadataItem: Decodable {
 
 private struct VideoMetadataSnippet: Decodable {
     let categoryID: String?
+    let title: String?
+    let channelTitle: String?
 
     enum CodingKeys: String, CodingKey {
         case categoryID = "categoryId"
+        case title
+        case channelTitle
     }
 }
 
@@ -1158,6 +1196,124 @@ private struct GoogleAPIErrorEnvelope: Decodable {
 
 private struct GoogleAPIError: Decodable {
     let message: String?
+}
+
+// MARK: - Music Content Helpers
+
+private extension YouTubeAPIService {
+
+    /// Returns true when the video is clearly non-music (kids songs, gaming, vlogs, etc.)
+    func isNonMusicContent(title: String, channel: String) -> Bool {
+        let t = title.lowercased()
+        let ch = channel.lowercased()
+
+        // Kids / nursery content
+        let kidsKeywords = [
+            "nursery rhyme", "baby shark", "kids song", "children's song", "children song",
+            "cocomelon", "super simple songs", "little baby bum", "blippi", "ms rachel",
+            "toddler song", "abc song", "phonics song", "wheels on the bus",
+            "if you're happy", "finger family", "johny johny", "five little",
+            "old macdonald", "twinkle twinkle", "baa baa", "itsy bitsy",
+            "pinkfong", "moonbug", "dave and ava", "little angel"
+        ]
+        for kw in kidsKeywords where t.contains(kw) || ch.contains(kw) { return true }
+
+        // Gaming content
+        let gamingKeywords = [
+            "gameplay", "let's play", "lets play", "playthrough", "walkthrough",
+            "minecraft", "roblox", "fortnite", "among us", "gta v", "call of duty",
+            "game review", "gaming montage"
+        ]
+        for kw in gamingKeywords where t.contains(kw) { return true }
+
+        // Vlog / lifestyle
+        let vlogKeywords = [
+            "daily vlog", "weekly vlog", "room tour", "morning routine", "night routine",
+            "get ready with me", "grwm", "what i eat in a day",
+            "unboxing video", "haul video", "try on haul"
+        ]
+        for kw in vlogKeywords where t.contains(kw) { return true }
+
+        // Channel-level signals
+        let nonMusicChannelSuffixes = ["gaming", "gamer", "plays", "vlogs"]
+        for suffix in nonMusicChannelSuffixes where ch.hasSuffix(suffix) { return true }
+
+        return false
+    }
+
+    /// Parses "M:SS" or "H:MM:SS" duration strings to total seconds.
+    func parseDurationSeconds(_ text: String) -> Int? {
+        let parts = text.split(separator: ":").compactMap { Int($0) }
+        switch parts.count {
+        case 2: return parts[0] * 60 + parts[1]
+        case 3: return parts[0] * 3_600 + parts[1] * 60 + parts[2]
+        default: return nil
+        }
+    }
+
+    /// Cleans YouTube video titles: strips "Artist - " prefix and common qualifiers.
+    func cleanTrackTitle(_ raw: String, channelName: String) -> String {
+        var title = raw
+
+        // Strip exact "Channel - " prefix first (most reliable)
+        let exactPrefix = channelName + " - "
+        if title.hasPrefix(exactPrefix) {
+            title = String(title.dropFirst(exactPrefix.count))
+        } else if let dashRange = title.range(of: " - ") {
+            // General "Artist - Title" split when artist part is a plausible short name
+            let leftCount = title.distance(from: title.startIndex, to: dashRange.lowerBound)
+            let right = String(title[dashRange.upperBound...])
+            if leftCount <= 50, !right.isEmpty {
+                title = right
+            }
+        }
+
+        // Remove trailing YouTube qualifiers (applied repeatedly to handle stacked ones)
+        let qualifiers: [String] = [
+            "(Official Music Video)", "[Official Music Video]",
+            "(Official Video)", "[Official Video]",
+            "(Official Audio)", "[Official Audio]",
+            "(Lyric Video)", "[Lyric Video]",
+            "(Lyrics Video)", "[Lyrics Video]",
+            "(Lyrics)", "[Lyrics]",
+            "(Audio)", "[Audio]",
+            "(Live Session)", "[Live Session]",
+            "(Live Performance)", "[Live Performance]",
+            "(HD)", "[HD]", "(4K)", "[4K]", "(HQ)", "[HQ]",
+            "(Official)", "[Official]",
+            "- Official Music Video", "- Official Video", "- Official Audio",
+            "- Lyric Video", "- Lyrics", "- Audio"
+        ]
+
+        var changed = true
+        while changed {
+            changed = false
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            for q in qualifiers {
+                if trimmed.lowercased().hasSuffix(q.lowercased()) {
+                    title = String(trimmed.dropLast(q.count))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    changed = true
+                    break
+                }
+            }
+        }
+
+        let result = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? raw : result
+    }
+
+    /// Cleans YouTube channel names: removes "- Topic" and "VEVO" suffixes.
+    func cleanArtistName(_ raw: String) -> String {
+        var name = raw
+        if name.hasSuffix(" - Topic") { name = String(name.dropLast(8)) }
+        if name.uppercased().hasSuffix("VEVO") {
+            name = String(name.dropLast(4)).trimmingCharacters(in: .whitespaces)
+        }
+        if name.hasSuffix(" Official") { name = String(name.dropLast(9)) }
+        let result = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? raw : result
+    }
 }
 
 private extension Array {
