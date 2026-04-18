@@ -17,12 +17,12 @@ struct SearchView: View {
                         recentSearchesSection
                     }
 
-                    if trimmedSearchQuery.isEmpty, appState.recentSearches.isEmpty == false {
+                    if trimmedSearchQuery.isEmpty {
                         suggestionsSection
                     }
 
                     if appState.isSearching, appState.searchResults.isEmpty {
-                        statusCard(label: "Searching YouTube...")
+                        statusCard(label: "Searching songs, playlists, albums, and artists...")
                     } else if appState.searchResults.isEmpty {
                         if trimmedSearchQuery.isEmpty, appState.recentSearches.isEmpty == false {
                             EmptyView()
@@ -34,18 +34,51 @@ struct SearchView: View {
                             statusCard(label: "Refreshing results...")
                         }
 
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("\(appState.searchResults.count) songs")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.white.opacity(0.6))
+                        resultSummary
 
-                            ForEach(appState.searchResults) { track in
-                                TrackRowView(
-                                    track: track,
-                                    showsNowPlayingIndicator: true,
-                                    showsDownloadButton: true
-                                ) {
-                                    playSearchTrack(track)
+                        if appState.searchResults.songs.isEmpty == false {
+                            resultSection(title: "Songs") {
+                                ForEach(appState.searchResults.songs) { track in
+                                    TrackRowView(
+                                        track: track,
+                                        showsNowPlayingIndicator: true,
+                                        showsDownloadButton: true
+                                    ) {
+                                        playSearchTrack(track)
+                                    }
+                                }
+                            }
+                        }
+
+                        if appState.searchResults.playlists.isEmpty == false {
+                            resultSection(title: "Playlists") {
+                                ForEach(appState.searchResults.playlists) { collection in
+                                    NavigationLink(value: collection) {
+                                        MusicCollectionRow(collection: collection)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        if appState.searchResults.albums.isEmpty == false {
+                            resultSection(title: "Albums") {
+                                ForEach(appState.searchResults.albums) { collection in
+                                    NavigationLink(value: collection) {
+                                        MusicCollectionRow(collection: collection)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        if appState.searchResults.artists.isEmpty == false {
+                            resultSection(title: "Artists") {
+                                ForEach(appState.searchResults.artists) { collection in
+                                    NavigationLink(value: collection) {
+                                        MusicCollectionRow(collection: collection)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -57,7 +90,10 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $appState.searchQuery, prompt: "Artists, songs, videos")
+            .navigationDestination(for: MusicCollection.self) { collection in
+                CollectionDetailView(collection: collection)
+            }
+            .searchable(text: $appState.searchQuery, prompt: "Songs, playlists, albums, artists")
             .onSubmit(of: .search) {
                 commitRecentSearch(from: appState.searchQuery)
                 scheduleSearch(for: appState.searchQuery, immediately: true)
@@ -81,29 +117,43 @@ struct SearchView: View {
 
     private var searchHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Search YouTube music, artists, and live sessions.")
+            Text("Search songs, playlists, albums, and artists, then save anything you like to your library.")
                 .font(.subheadline)
-                .foregroundStyle(Color.white.opacity(0.62))
+                .foregroundStyle(Color.white.opacity(0.68))
 
-            if trimmedSearchQuery.isEmpty == false {
-                Text("Results update as you type, and tapping a song starts the native background player.")
-                    .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.48))
-            }
+            Text(appState.isYouTubeConnected ? "Connected to YouTube, with your MusicTube library available everywhere." : "Guest mode is active. Connect YouTube anytime from Library for account sync.")
+                .font(.footnote)
+                .foregroundStyle(Color.white.opacity(0.46))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var resultSummary: some View {
+        Text("\(appState.searchResults.totalResultCount) results")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.6))
+    }
+
+    private func resultSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+
+            content()
+        }
+    }
+
     private var emptyStateMessage: String {
         if trimmedSearchQuery.isEmpty {
-            return "Search YouTube music"
+            return "Search for songs, playlists, albums, or artists."
         }
 
         if appState.isSearching {
             return "Searching..."
         }
 
-        return "No songs matched that search."
+        return "No results matched that search."
     }
 
     private var trimmedSearchQuery: String {
@@ -169,9 +219,9 @@ struct SearchView: View {
                 .foregroundStyle(Color.white.opacity(0.72))
 
             if isLoadingSuggestedTracks, suggestedTracks.isEmpty {
-                statusCard(label: "Loading song suggestions...")
+                statusCard(label: "Learning your taste...")
             } else if suggestedTracks.isEmpty {
-                statusCard(label: "Search and play a few songs to build suggestions from your recent searches.")
+                statusCard(label: "Search and play a few songs to unlock personalized suggestions.")
             } else {
                 VStack(spacing: 12) {
                     ForEach(suggestedTracks) { track in
@@ -205,7 +255,7 @@ struct SearchView: View {
 
     private func statusCard(label: String) -> some View {
         HStack(spacing: 10) {
-            if appState.isSearching {
+            if appState.isSearching || isLoadingSuggestedTracks {
                 ProgressView()
                     .tint(.white)
             }
@@ -225,7 +275,7 @@ struct SearchView: View {
 
     private func playSearchTrack(_ track: Track) {
         commitRecentSearch(from: appState.searchQuery)
-        appState.play(track: track, queue: appState.searchResults)
+        appState.play(track: track, queue: appState.searchResults.songs)
     }
 
     private func playSuggestedTrack(_ track: Track) {
@@ -246,12 +296,6 @@ struct SearchView: View {
 
     private func refreshSuggestedTracks() async {
         guard trimmedSearchQuery.isEmpty else {
-            suggestedTracks = []
-            isLoadingSuggestedTracks = false
-            return
-        }
-
-        guard appState.recentSearches.isEmpty == false else {
             suggestedTracks = []
             isLoadingSuggestedTracks = false
             return
@@ -286,6 +330,69 @@ struct SearchView: View {
 
             guard Task.isCancelled == false else { return }
             _ = await appState.search(query: trimmedQuery)
+        }
+    }
+}
+
+private struct MusicCollectionRow: View {
+    @EnvironmentObject private var appState: AppState
+    let collection: MusicCollection
+
+    var body: some View {
+        HStack(spacing: 14) {
+            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 14)
+                .frame(width: 58, height: 58)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(collection.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Text(detailLine)
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Button {
+                appState.toggleCollectionSaved(collection)
+            } label: {
+                Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
+                    .font(.headline)
+                    .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.68))
+                    .frame(width: 38, height: 38)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+    }
+
+    private var detailLine: String {
+        var parts = [collectionKindLabel]
+        if collection.subtitle.isEmpty == false {
+            parts.append(collection.subtitle)
+        }
+        if collection.itemCount > 0 {
+            parts.append(collection.itemCount == 1 ? "1 track" : "\(collection.itemCount) tracks")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var collectionKindLabel: String {
+        switch collection.kind {
+        case .playlist: return "Playlist"
+        case .album: return "Album"
+        case .artist: return "Artist"
         }
     }
 }

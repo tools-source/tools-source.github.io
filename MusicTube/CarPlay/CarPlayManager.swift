@@ -66,9 +66,9 @@ final class CarPlayManager: NSObject {
         let state = appState
 
         let fy = makeListTemplate(
-            title: "For You",
-            tabTitle: "For You",
-            tabImage: UIImage(systemName: "star.fill"),
+            title: "Home",
+            tabTitle: "Home",
+            tabImage: UIImage(systemName: "house.fill"),
             sections: forYouSections(state))
         let lib = makeListTemplate(
             title: "Library",
@@ -106,11 +106,8 @@ final class CarPlayManager: NSObject {
         guard let state else {
             return [section("", [plain("Loading your music…")])]
         }
-        guard state.authState == .signedIn else {
-            if state.authState == .restoring {
-                return [section("", [plain("Loading your music…")])]
-            }
-            return [section("", [plain("Open MusicTube on iPhone to sign in.")])]
+        guard state.authState != .restoring else {
+            return [section("", [plain("Loading your music…")])]
         }
 
         var sections: [CPListSection] = []
@@ -123,15 +120,16 @@ final class CarPlayManager: NSObject {
             sections.append(section("Suggested Mixes", Array(items)))
         }
 
-        // ── For You ────────────────────────────────────────────────────────
+        // ── Recommended for you ────────────────────────────────────────────
         if state.isLoading && state.featuredTracks.isEmpty {
-            sections.append(section("For You", [plain("Loading your picks…")]))
+            sections.append(section("Recommended for you", [plain("Loading your picks…")]))
         } else if state.featuredTracks.isEmpty {
-            sections.append(section("For You", [plain("Pull to refresh on your iPhone.")]))
+            let emptyMessage = state.homeStatusMessage ?? "Open Home on your iPhone to refresh recommendations."
+            sections.append(section("Recommended for you", [plain(emptyMessage)]))
         } else {
             let queue = Array(state.featuredTracks.prefix(30))
             let items = queue.map { trackRow($0, queue: queue, state: state) }
-            sections.append(section("For You", items))
+            sections.append(section("Recommended for you", items))
         }
 
         return sections.isEmpty ? [section("", [plain("No content yet.")])] : sections
@@ -143,11 +141,8 @@ final class CarPlayManager: NSObject {
         guard let state else {
             return [section("", [plain("Loading your music…")])]
         }
-        guard state.authState == .signedIn else {
-            if state.authState == .restoring {
-                return [section("", [plain("Loading your music…")])]
-            }
-            return [section("", [plain("Open MusicTube on iPhone to sign in.")])]
+        guard state.authState != .restoring else {
+            return [section("", [plain("Loading your music…")])]
         }
 
         if state.isLoadingPlaylists && state.playlists.isEmpty {
@@ -159,6 +154,11 @@ final class CarPlayManager: NSObject {
         if let liked = state.likedSongsPlaylist {
             sections.append(section("Liked Songs",
                                     [playlistRow(liked, state: state)]))
+        }
+
+        if let saved = state.savedSongsPlaylist {
+            sections.append(section("Saved Songs",
+                                    [playlistRow(saved, state: state)]))
         }
 
         let mixes = state.suggestedMixes
@@ -283,7 +283,9 @@ final class CarPlayManager: NSObject {
                     guard let (data, _) = try? await URLSession.shared.data(from: url),
                           let raw = UIImage(data: data) else { return }
                     let sized = await self.squareImage(raw, side: 60)
-                    self.cache.setObject(sized, forKey: url as NSURL)
+                    await MainActor.run {
+                        self.cache.setObject(sized, forKey: url as NSURL)
+                    }
                 }
             }
         }
@@ -342,8 +344,9 @@ final class CarPlayManager: NSObject {
         switch p.kind {
         case .likedMusic: return n == 1 ? "1 song"   : "\(n) songs"
         case .uploads:    return n == 1 ? "1 upload" : "\(n) uploads"
+        case .savedSongs: return n == 1 ? "1 saved song" : "\(n) saved songs"
+        case .custom:     return n == 1 ? "1 track"  : "\(n) tracks"
         case .standard:   return n == 1 ? "1 track"  : "\(n) tracks"
         }
     }
 }
-

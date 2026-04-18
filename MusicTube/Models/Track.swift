@@ -46,6 +46,8 @@ enum PlaylistKind: String, Hashable, Sendable {
     case standard
     case likedMusic
     case uploads
+    case savedSongs
+    case custom
 }
 
 struct Playlist: Identifiable, Hashable, Sendable {
@@ -57,6 +59,70 @@ struct Playlist: Identifiable, Hashable, Sendable {
     let kind: PlaylistKind
 }
 
+enum MusicCollectionKind: String, Codable, Hashable, Sendable {
+    case playlist
+    case album
+    case artist
+}
+
+struct MusicCollection: Identifiable, Hashable, Sendable, Codable {
+    let id: String
+    let sourceID: String
+    let title: String
+    let subtitle: String
+    let description: String
+    let artworkURL: URL?
+    let itemCount: Int
+    let kind: MusicCollectionKind
+    let queryHint: String
+
+    init(
+        id: String? = nil,
+        sourceID: String,
+        title: String,
+        subtitle: String = "",
+        description: String = "",
+        artworkURL: URL? = nil,
+        itemCount: Int = 0,
+        kind: MusicCollectionKind,
+        queryHint: String? = nil
+    ) {
+        self.sourceID = sourceID
+        self.title = title
+        self.subtitle = subtitle
+        self.description = description
+        self.artworkURL = artworkURL
+        self.itemCount = itemCount
+        self.kind = kind
+        self.queryHint = queryHint ?? [title, subtitle]
+            .filter { $0.isEmpty == false }
+            .joined(separator: " ")
+        self.id = id ?? "\(kind.rawValue):\(sourceID)"
+    }
+}
+
+struct SearchResponse: Hashable, Sendable {
+    var songs: [Track]
+    var playlists: [MusicCollection]
+    var albums: [MusicCollection]
+    var artists: [MusicCollection]
+
+    static let empty = SearchResponse(
+        songs: [],
+        playlists: [],
+        albums: [],
+        artists: []
+    )
+
+    var isEmpty: Bool {
+        songs.isEmpty && playlists.isEmpty && albums.isEmpty && artists.isEmpty
+    }
+
+    var totalResultCount: Int {
+        songs.count + playlists.count + albums.count + artists.count
+    }
+}
+
 extension Array where Element == Playlist {
     func mixAlbumCandidates(limit: Int = 8) -> [Playlist] {
         Array(suggestedMixCandidates().prefix(limit))
@@ -64,7 +130,7 @@ extension Array where Element == Playlist {
 
     func suggestedMixCandidates() -> [Playlist] {
         let standardPlaylists = filter { playlist in
-            playlist.kind == .standard && playlist.itemCount > 0
+            (playlist.kind == .standard || playlist.kind == .custom) && playlist.itemCount > 0
         }
 
         let fallbackCollections = filter { playlist in

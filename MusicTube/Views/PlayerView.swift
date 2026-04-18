@@ -32,6 +32,7 @@ struct PlayerView: View {
                     transportCard
                     secondaryControls
                     utilityCard
+                    relatedSongsSection
                     if let youtubeURL = track.youtubeWatchURL {
                         youtubeLink(url: youtubeURL)
                     }
@@ -198,15 +199,19 @@ struct PlayerView: View {
 
             Spacer(minLength: 8)
 
-            Button {
-                appState.toggleLike(for: track)
-            } label: {
-                Image(systemName: appState.isTrackLiked(track) ? "heart.fill" : "heart")
-                    .font(.title2)
-                    .foregroundStyle(appState.isTrackLiked(track) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.6))
-                    .animation(.spring(response: 0.3), value: appState.isTrackLiked(track))
+            HStack(spacing: 10) {
+                TrackActionsButton(track: track, size: 38)
+
+                Button {
+                    appState.toggleLike(for: track)
+                } label: {
+                    Image(systemName: appState.isTrackLiked(track) ? "heart.fill" : "heart")
+                        .font(.title2)
+                        .foregroundStyle(appState.isTrackLiked(track) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.6))
+                        .animation(.spring(response: 0.3), value: appState.isTrackLiked(track))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 2)
     }
@@ -392,6 +397,51 @@ struct PlayerView: View {
         }
         .padding(.vertical, 6)
         .background(glassCard(cornerRadius: 24))
+    }
+
+    private var relatedSongsSection: some View {
+        let displayedTracks = Array(appState.relatedTracks.prefix(8))
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Related Songs")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                if appState.isLoadingRelatedTracks {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(0.75)
+                }
+            }
+
+            if displayedTracks.isEmpty {
+                Text(appState.isLoadingRelatedTracks ? "Loading related songs..." : "Play more songs and MusicTube will keep improving the matches here.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(glassCard(cornerRadius: 22))
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(displayedTracks.enumerated()), id: \.element.id) { index, relatedTrack in
+                        RecommendedRow(track: relatedTrack) {
+                            appState.play(track: relatedTrack, queue: appState.relatedTracks)
+                        }
+                        .padding(.horizontal, 16)
+
+                        if index < displayedTracks.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 92)
+                        }
+                    }
+                }
+                .background(glassCard(cornerRadius: 22))
+            }
+        }
     }
 
     private func infoRow(icon: String, iconColor: Color, title: String, subtitle: String) -> some View {

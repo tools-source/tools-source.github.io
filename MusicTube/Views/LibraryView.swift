@@ -9,19 +9,11 @@ struct LibraryView: View {
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 24) {
                     accountSection
-
-                    if let libraryStatusMessage = appState.libraryStatusMessage,
-                       appState.playlists.isEmpty,
-                       appState.isLoadingPlaylists == false {
-                        librarySection("Library Status") {
-                            Text(libraryStatusMessage)
-                                .font(.subheadline)
-                                .foregroundStyle(Color.white.opacity(0.72))
-                        }
-                    }
-
+                    quickActionsSection
                     likedSongsSection
-
+                    savedSongsSection
+                    customPlaylistsSection
+                    savedCollectionsSection
                     playlistsSection
                 }
                 .padding(.horizontal, 20)
@@ -32,6 +24,9 @@ struct LibraryView: View {
             .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: Playlist.self) { playlist in
                 PlaylistDetailView(playlist: playlist)
+            }
+            .navigationDestination(for: MusicCollection.self) { collection in
+                CollectionDetailView(collection: collection)
             }
             .refreshable {
                 await appState.refreshLibrary()
@@ -59,22 +54,9 @@ struct LibraryView: View {
                     }
                 }
             } message: {
-                Text("This removes the saved MusicTube session, downloads, likes, recent plays, and recent searches stored on this device. It does not delete your Google or YouTube account.")
+                Text("This removes MusicTube’s local library, playlists, downloads, likes, and listening history from this iPhone. It does not delete your Google or YouTube account.")
             }
         }
-    }
-
-    private var likedSongsEmptyStateMessage: String {
-        if appState.isUsingLocalLibraryFallback {
-            if let libraryStatusMessage = appState.libraryStatusMessage,
-               libraryStatusMessage.isEmpty == false {
-                return "\(libraryStatusMessage)\nTap the heart on a song to save it here."
-            }
-
-            return "Tap the heart on a song to save it here."
-        }
-
-        return appState.libraryStatusMessage ?? "No liked songs were found for this account yet."
     }
 
     private var bottomSpacing: CGFloat {
@@ -93,7 +75,7 @@ struct LibraryView: View {
     }
 
     private var accountSection: some View {
-        librarySection("Account") {
+        librarySection(appState.isYouTubeConnected ? "Account" : "Guest Mode") {
             VStack(alignment: .leading, spacing: 16) {
                 if let user = appState.user {
                     VStack(alignment: .leading, spacing: 6) {
@@ -105,23 +87,56 @@ struct LibraryView: View {
                             .font(.subheadline)
                             .foregroundStyle(Color.white.opacity(0.6))
                     }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Your library is local and ready to use.")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+
+                        Text("Connect YouTube anytime to import your account library while keeping your MusicTube guest library and playlists on this device.")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.white.opacity(0.62))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 Divider()
                     .overlay(Color.white.opacity(0.08))
 
-                Text("MusicTube does not create a separate app account. Sign out removes the saved session. Delete MusicTube Data removes the app's local session, downloads, and on-device activity from this iPhone.")
-                    .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.62))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Sign out", role: .destructive) {
-                    Task {
-                        await appState.signOut()
-                    }
+                if let libraryStatusMessage = appState.libraryStatusMessage {
+                    Text(libraryStatusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .font(.headline)
-                .disabled(appState.isDeletingAccountData)
+
+                if appState.isYouTubeConnected {
+                    Button("Disconnect YouTube", role: .destructive) {
+                        Task {
+                            await appState.signOut()
+                        }
+                    }
+                    .font(.headline)
+                } else {
+                    Button {
+                        Task {
+                            await appState.signIn()
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "person.crop.circle.badge.checkmark")
+                            Text("Connect YouTube")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(red: 1, green: 0.23, blue: 0.42))
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(appState.isLoading)
+                }
 
                 Button("Delete MusicTube Data", role: .destructive) {
                     isShowingDeleteDataConfirmation = true
@@ -142,41 +157,109 @@ struct LibraryView: View {
         }
     }
 
+    private var quickActionsSection: some View {
+        librarySection("Quick Actions") {
+            Button {
+                appState.presentPlaylistCreator()
+            } label: {
+                HStack {
+                    Image(systemName: "music.note.list")
+                    Text("Create Playlist")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Image(systemName: "plus.circle.fill")
+                }
+                .foregroundStyle(.white)
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.white.opacity(0.07))
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private var likedSongsSection: some View {
         librarySection("Liked Songs") {
             if appState.isLoadingPlaylists && appState.playlists.isEmpty {
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .tint(.white)
-                    Text("Importing liked songs and playlists...")
-                        .foregroundStyle(Color.white.opacity(0.72))
-                }
+                loadingLabel("Syncing liked songs...")
             } else if let likedSongs = appState.likedSongsPlaylist {
                 NavigationLink(value: likedSongs) {
                     PlaylistRow(playlist: likedSongs)
                 }
                 .buttonStyle(.plain)
             } else {
-                Text(likedSongsEmptyStateMessage)
+                Text("Tap the heart on a song to keep it here.")
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
             }
         }
     }
 
-    private var playlistsSection: some View {
-        librarySection("Playlists") {
-            if appState.libraryPlaylists.isEmpty {
-                Text(
-                    appState.isUsingLocalLibraryFallback
-                        ? "Search and play more songs to keep building Replay Mix and Favorites Mix."
-                        : (appState.libraryStatusMessage ?? "No playlists found for this account yet.")
-                )
+    private var savedSongsSection: some View {
+        librarySection("Saved Songs") {
+            if let savedSongs = appState.savedSongsPlaylist {
+                NavigationLink(value: savedSongs) {
+                    PlaylistRow(playlist: savedSongs)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("Save any song from Search, Home, Downloads, or the Player and it’ll show up here.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.65))
+            }
+        }
+    }
+
+    private var customPlaylistsSection: some View {
+        librarySection("Your Playlists") {
+            if appState.customPlaylists.isEmpty {
+                Text("Create playlists and add tracks from anywhere in the app.")
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
             } else {
                 VStack(spacing: 12) {
-                    ForEach(appState.libraryPlaylists) { playlist in
+                    ForEach(appState.customPlaylists) { playlist in
+                        NavigationLink(value: playlist) {
+                            PlaylistRow(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private var savedCollectionsSection: some View {
+        librarySection("Saved Collections") {
+            if appState.savedCollections.isEmpty {
+                Text("Save playlists, albums, and artists from Search for quick access later.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.65))
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(appState.savedCollections) { collection in
+                        NavigationLink(value: collection) {
+                            SavedCollectionRow(collection: collection)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private var playlistsSection: some View {
+        librarySection("Mixes & Synced Playlists") {
+            let remoteCollections = appState.libraryPlaylists.filter { $0.kind != .custom }
+            if remoteCollections.isEmpty {
+                Text("As you listen more, MusicTube will keep building mixes and recommendations here.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.65))
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(remoteCollections) { playlist in
                         NavigationLink(value: playlist) {
                             PlaylistRow(playlist: playlist)
                         }
@@ -210,6 +293,15 @@ struct LibraryView: View {
                             .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
                     }
             )
+        }
+    }
+
+    private func loadingLabel(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+            Text(text)
+                .foregroundStyle(Color.white.opacity(0.72))
         }
     }
 }
@@ -248,9 +340,59 @@ private struct PlaylistRow: View {
             return playlist.itemCount == 1 ? "1 song" : "\(playlist.itemCount) songs"
         case .uploads:
             return playlist.itemCount == 1 ? "1 upload" : "\(playlist.itemCount) uploads"
+        case .savedSongs:
+            return playlist.itemCount == 1 ? "1 saved song" : "\(playlist.itemCount) saved songs"
+        case .custom:
+            return playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks"
         case .standard:
             return playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks"
         }
+    }
+}
+
+private struct SavedCollectionRow: View {
+    let collection: MusicCollection
+
+    var body: some View {
+        HStack(spacing: 12) {
+            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 16)
+                .frame(width: 64, height: 64)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(collection.title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.6))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 10)
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(Color.white.opacity(0.35))
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var subtitle: String {
+        var parts: [String] = []
+        switch collection.kind {
+        case .playlist: parts.append("Playlist")
+        case .album: parts.append("Album")
+        case .artist: parts.append("Artist")
+        }
+        if collection.subtitle.isEmpty == false {
+            parts.append(collection.subtitle)
+        }
+        if collection.itemCount > 0 {
+            parts.append(collection.itemCount == 1 ? "1 track" : "\(collection.itemCount) tracks")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -265,28 +407,94 @@ struct PlaylistDetailView: View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: 14) {
                 if isLoading {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                            .tint(.white)
-                        Text("Loading playlist tracks...")
-                            .foregroundStyle(Color.white.opacity(0.72))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(18)
-                    .background(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(Color.white.opacity(0.07))
-                    )
+                    loadingCard("Loading playlist tracks...")
                 } else if tracks.isEmpty {
-                    Text("This collection does not have playable YouTube items yet.")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.white.opacity(0.72))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(18)
-                        .background(
-                            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                .fill(Color.white.opacity(0.07))
-                        )
+                    loadingCard("This collection does not have playable items yet.")
+                } else {
+                    ForEach(tracks) { track in
+                        TrackRowView(
+                            track: track,
+                            showsNowPlayingIndicator: true,
+                            showsDownloadButton: true
+                        ) {
+                            appState.play(track: track, queue: tracks)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, appState.nowPlaying == nil ? 108 : 174)
+        }
+        .background(detailBackground)
+        .navigationTitle(playlist.title)
+        .toolbar {
+            if playlist.kind == .custom {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        appState.presentPlaylistCreator()
+                    } label: {
+                        Image(systemName: "plus.circle")
+                            .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                    }
+                }
+            }
+        }
+        .task {
+            guard tracks.isEmpty else { return }
+            tracks = await appState.loadPlaylistItems(
+                for: playlist,
+                forceRefresh: playlist.kind == .likedMusic
+            )
+            isLoading = false
+        }
+        .refreshable {
+            tracks = await appState.loadPlaylistItems(for: playlist, forceRefresh: true)
+            isLoading = false
+        }
+    }
+
+    private var detailBackground: some View {
+        LinearGradient(
+            colors: [Color.black, Color(red: 0.03, green: 0.03, blue: 0.05)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
+    }
+
+    private func loadingCard(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+            Text(text)
+                .foregroundStyle(Color.white.opacity(0.72))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+        )
+    }
+}
+
+struct CollectionDetailView: View {
+    @EnvironmentObject private var appState: AppState
+    let collection: MusicCollection
+
+    @State private var tracks: [Track] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            LazyVStack(spacing: 14) {
+                headerCard
+
+                if isLoading {
+                    loadingCard("Loading \(collectionTitleLowercased) tracks...")
+                } else if tracks.isEmpty {
+                    loadingCard("No playable songs were found for this \(collectionTitleLowercased).")
                 } else {
                     ForEach(tracks) { track in
                         TrackRowView(
@@ -311,18 +519,85 @@ struct PlaylistDetailView: View {
             )
             .ignoresSafeArea()
         )
-        .navigationTitle(playlist.title)
+        .navigationTitle(collection.title)
         .task {
             guard tracks.isEmpty else { return }
-            tracks = await appState.loadPlaylistItems(
-                for: playlist,
-                forceRefresh: playlist.kind == .likedMusic
-            )
+            tracks = await appState.loadCollectionItems(for: collection)
             isLoading = false
         }
         .refreshable {
-            tracks = await appState.loadPlaylistItems(for: playlist, forceRefresh: true)
+            tracks = await appState.loadCollectionItems(for: collection, forceRefresh: true)
             isLoading = false
         }
+    }
+
+    private var headerCard: some View {
+        HStack(spacing: 14) {
+            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 18)
+                .frame(width: 72, height: 72)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(collectionKindLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.58))
+
+                Text(collection.title)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                if collection.subtitle.isEmpty == false {
+                    Text(collection.subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.white.opacity(0.62))
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            Button {
+                appState.toggleCollectionSaved(collection)
+            } label: {
+                Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
+                    .font(.headline)
+                    .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.65))
+                    .frame(width: 40, height: 40)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+    }
+
+    private var collectionKindLabel: String {
+        switch collection.kind {
+        case .playlist: return "Playlist"
+        case .album: return "Album"
+        case .artist: return "Artist"
+        }
+    }
+
+    private var collectionTitleLowercased: String {
+        collectionKindLabel.lowercased()
+    }
+
+    private func loadingCard(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+            Text(text)
+                .foregroundStyle(Color.white.opacity(0.72))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+        )
     }
 }

@@ -10,9 +10,7 @@ struct RootView: View {
             case .restoring:
                 ProgressView("Loading your music...")
                     .tint(.white)
-            case .signedOut:
-                LoginView()
-            case .signedIn:
+            case .guest, .signedIn:
                 MainTabView()
             }
         }
@@ -35,6 +33,14 @@ struct RootView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(appState.errorMessage ?? "Unknown error")
+        }
+        .sheet(isPresented: $appState.isPlaylistPickerPresented, onDismiss: {
+            appState.dismissPlaylistPicker()
+        }) {
+            PlaylistPickerSheet()
+                .environmentObject(appState)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 }
@@ -103,6 +109,157 @@ private struct MainTabView: View {
 
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
+    }
+}
+
+private struct PlaylistPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppState
+    @State private var playlistName = ""
+
+    var body: some View {
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(appState.playlistPickerTrack == nil ? "Create playlist" : "Save to playlist")
+                            .font(.title3.bold())
+                            .foregroundStyle(.white)
+
+                        Text(helperText)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.white.opacity(0.64))
+                    }
+
+                    if appState.playlistPickerTrack != nil, appState.customPlaylists.isEmpty == false {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Your playlists")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+
+                            ForEach(appState.customPlaylists) { playlist in
+                                Button {
+                                    appState.addPlaylistPickerTrack(to: playlist)
+                                    dismiss()
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 10)
+                                            .frame(width: 48, height: 48)
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(playlist.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(.white)
+                                            Text(playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks")
+                                                .font(.caption)
+                                                .foregroundStyle(Color.white.opacity(0.58))
+                                        }
+
+                                        Spacer()
+
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.title3)
+                                            .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                                    }
+                                    .padding(14)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                            .fill(Color.white.opacity(0.06))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Divider()
+                                .overlay(Color.white.opacity(0.08))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(appState.playlistPickerTrack == nil ? "New playlist" : "Create new playlist")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+
+                        TextField("Playlist name", text: $playlistName)
+                            .textInputAutocapitalization(.words)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                            .foregroundStyle(.white)
+
+                        Button {
+                            if appState.createCustomPlaylist(named: playlistName) {
+                                dismiss()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "music.note.list")
+                                Text(appState.playlistPickerTrack == nil ? "Create Playlist" : "Create & Add Song")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color(red: 1, green: 0.23, blue: 0.42))
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        if let track = appState.playlistPickerTrack {
+                            trackPreview(track)
+                        }
+                    }
+                }
+                .padding(20)
+                .padding(.bottom, 20)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        appState.dismissPlaylistPicker()
+                        dismiss()
+                    }
+                    .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                }
+            }
+        }
+    }
+
+    private var helperText: String {
+        if let track = appState.playlistPickerTrack {
+            return "Add \(track.title) to an existing playlist or create a new one."
+        }
+
+        return "Create a playlist now and start filling it from search, home, downloads, or the player."
+    }
+
+    private func trackPreview(_ track: Track) -> some View {
+        HStack(spacing: 12) {
+            AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
+                .frame(width: 52, height: 52)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(track.artist)
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.6))
+            }
+
+            Spacer()
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
     }
 }
 

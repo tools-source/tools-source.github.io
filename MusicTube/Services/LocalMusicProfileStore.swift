@@ -1,13 +1,30 @@
 import Foundation
 
+struct CustomPlaylistRecord: Codable, Identifiable, Hashable, Sendable {
+    var id: String
+    var title: String
+    var description: String
+    var createdAt: Date
+    var tracks: [Track]
+}
+
 struct LocalMusicProfileSnapshot {
     let likedTracks: [Track]
+    let savedTracks: [Track]
+    let savedCollections: [MusicCollection]
+    let customPlaylists: [CustomPlaylistRecord]
     let recentTracks: [Track]
     let topTracks: [Track]
     let recentSearches: [String]
+    let topArtists: [String]
 
     var hasContent: Bool {
-        likedTracks.isEmpty == false || recentTracks.isEmpty == false || topTracks.isEmpty == false
+        likedTracks.isEmpty == false ||
+        savedTracks.isEmpty == false ||
+        savedCollections.isEmpty == false ||
+        customPlaylists.isEmpty == false ||
+        recentTracks.isEmpty == false ||
+        topTracks.isEmpty == false
     }
 }
 
@@ -16,11 +33,17 @@ final class LocalMusicProfileStore {
 
     private struct StoredProfile: Codable {
         var likedTracks: [Track] = []
+        var savedTracks: [Track] = []
+        var savedCollections: [MusicCollection] = []
+        var customPlaylists: [CustomPlaylistRecord] = []
         var playRecords: [PlayRecord] = []
         var recentSearches: [String] = []
 
         enum CodingKeys: String, CodingKey {
             case likedTracks
+            case savedTracks
+            case savedCollections
+            case customPlaylists
             case playRecords
             case recentSearches
         }
@@ -30,6 +53,9 @@ final class LocalMusicProfileStore {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             likedTracks = try container.decodeIfPresent([Track].self, forKey: .likedTracks) ?? []
+            savedTracks = try container.decodeIfPresent([Track].self, forKey: .savedTracks) ?? []
+            savedCollections = try container.decodeIfPresent([MusicCollection].self, forKey: .savedCollections) ?? []
+            customPlaylists = try container.decodeIfPresent([CustomPlaylistRecord].self, forKey: .customPlaylists) ?? []
             playRecords = try container.decodeIfPresent([PlayRecord].self, forKey: .playRecords) ?? []
             recentSearches = try container.decodeIfPresent([String].self, forKey: .recentSearches) ?? []
         }
@@ -108,7 +134,7 @@ final class LocalMusicProfileStore {
             }
             return lhs.playCount > rhs.playCount
         }
-        profile.playRecords = Array(profile.playRecords.prefix(100))
+        profile.playRecords = Array(profile.playRecords.prefix(120))
         profiles[profileID] = profile
         persistProfiles()
         return snapshot(from: profile)
@@ -116,19 +142,7 @@ final class LocalMusicProfileStore {
 
     @discardableResult
     func toggleLike(for track: Track, profileID: String) -> LocalMusicProfileSnapshot {
-        var profile = profiles[profileID] ?? StoredProfile()
-        let identifier = trackIdentifier(track)
-
-        if let existingIndex = profile.likedTracks.firstIndex(where: { trackIdentifier($0) == identifier }) {
-            profile.likedTracks.remove(at: existingIndex)
-        } else {
-            profile.likedTracks.insert(track, at: 0)
-        }
-
-        profile.likedTracks = deduplicatedTracks(profile.likedTracks).prefix(200).map { $0 }
-        profiles[profileID] = profile
-        persistProfiles()
-        return snapshot(from: profile)
+        setLike(isTrackLiked(track, for: profileID) == false, for: track, profileID: profileID)
     }
 
     @discardableResult
@@ -141,7 +155,7 @@ final class LocalMusicProfileStore {
             profile.likedTracks.insert(track, at: 0)
         }
 
-        profile.likedTracks = deduplicatedTracks(profile.likedTracks).prefix(200).map { $0 }
+        profile.likedTracks = Array(deduplicatedTracks(profile.likedTracks).prefix(200))
         profiles[profileID] = profile
         persistProfiles()
         return snapshot(from: profile)
@@ -150,6 +164,105 @@ final class LocalMusicProfileStore {
     func isTrackLiked(_ track: Track, for profileID: String) -> Bool {
         let identifier = trackIdentifier(track)
         return profiles[profileID]?.likedTracks.contains(where: { trackIdentifier($0) == identifier }) ?? false
+    }
+
+    @discardableResult
+    func setTrackSaved(_ isSaved: Bool, for track: Track, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+        let identifier = trackIdentifier(track)
+
+        profile.savedTracks.removeAll { trackIdentifier($0) == identifier }
+        if isSaved {
+            profile.savedTracks.insert(track, at: 0)
+        }
+
+        profile.savedTracks = Array(deduplicatedTracks(profile.savedTracks).prefix(400))
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    func isTrackSaved(_ track: Track, for profileID: String) -> Bool {
+        let identifier = trackIdentifier(track)
+        return profiles[profileID]?.savedTracks.contains(where: { trackIdentifier($0) == identifier }) ?? false
+    }
+
+    @discardableResult
+    func setCollectionSaved(_ isSaved: Bool, for collection: MusicCollection, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+        profile.savedCollections.removeAll { $0.id == collection.id }
+        if isSaved {
+            profile.savedCollections.insert(collection, at: 0)
+        }
+
+        profile.savedCollections = Array(deduplicatedCollections(profile.savedCollections).prefix(200))
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    func isCollectionSaved(_ collection: MusicCollection, for profileID: String) -> Bool {
+        profiles[profileID]?.savedCollections.contains(where: { $0.id == collection.id }) ?? false
+    }
+
+    @discardableResult
+    func createCustomPlaylist(
+        named name: String,
+        description: String = "",
+        seedTrack: Track? = nil,
+        profileID: String
+    ) -> CustomPlaylistRecord? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else { return nil }
+
+        var profile = profiles[profileID] ?? StoredProfile()
+        var playlist = CustomPlaylistRecord(
+            id: "local-user-playlist-\(UUID().uuidString)",
+            title: trimmedName,
+            description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+            createdAt: Date(),
+            tracks: []
+        )
+
+        if let seedTrack {
+            playlist.tracks = [seedTrack]
+        }
+
+        profile.customPlaylists.insert(playlist, at: 0)
+        profiles[profileID] = profile
+        persistProfiles()
+        return playlist
+    }
+
+    @discardableResult
+    func addTrack(_ track: Track, toCustomPlaylist playlistID: String, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+
+        if let playlistIndex = profile.customPlaylists.firstIndex(where: { $0.id == playlistID }) {
+            var playlist = profile.customPlaylists[playlistIndex]
+            let identifier = trackIdentifier(track)
+            playlist.tracks.removeAll { trackIdentifier($0) == identifier }
+            playlist.tracks.insert(track, at: 0)
+            profile.customPlaylists[playlistIndex] = playlist
+        }
+
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    @discardableResult
+    func removeTrack(_ track: Track, fromCustomPlaylist playlistID: String, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+
+        if let playlistIndex = profile.customPlaylists.firstIndex(where: { $0.id == playlistID }) {
+            let identifier = trackIdentifier(track)
+            profile.customPlaylists[playlistIndex].tracks.removeAll { trackIdentifier($0) == identifier }
+        }
+
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
     }
 
     @discardableResult
@@ -189,8 +302,10 @@ final class LocalMusicProfileStore {
 
     private func snapshot(from profile: StoredProfile) -> LocalMusicProfileSnapshot {
         let likedTracks = deduplicatedTracks(profile.likedTracks)
+        let savedTracks = deduplicatedTracks(profile.savedTracks)
         let recentTracks = deduplicatedTracks(
             profile.playRecords
+                .sorted { $0.lastPlayedAt > $1.lastPlayedAt }
                 .map(\.track)
         )
         let topTracks = deduplicatedTracks(
@@ -203,9 +318,32 @@ final class LocalMusicProfileStore {
                 }
                 .map(\.track)
         )
+        let topArtists = orderedUniqueStrings(
+            profile.playRecords
+                .sorted {
+                    if $0.playCount != $1.playCount {
+                        return $0.playCount > $1.playCount
+                    }
+                    return $0.lastPlayedAt > $1.lastPlayedAt
+                }
+                .map(\.track.artist)
+            + likedTracks.map(\.artist)
+            + savedTracks.map(\.artist)
+            + profile.savedCollections
+                .filter { $0.kind == .artist }
+                .map(\.title)
+        )
 
         return LocalMusicProfileSnapshot(
             likedTracks: Array(likedTracks.prefix(100)),
+            savedTracks: Array(savedTracks.prefix(200)),
+            savedCollections: Array(deduplicatedCollections(profile.savedCollections).prefix(200)),
+            customPlaylists: profile.customPlaylists.sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt {
+                    return lhs.createdAt > rhs.createdAt
+                }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            },
             recentTracks: Array(recentTracks.prefix(100)),
             topTracks: Array(topTracks.prefix(100)),
             recentSearches: Array(
@@ -213,7 +351,8 @@ final class LocalMusicProfileStore {
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { $0.isEmpty == false }
                     .prefix(20)
-            )
+            ),
+            topArtists: Array(topArtists.prefix(20))
         )
     }
 
@@ -221,6 +360,24 @@ final class LocalMusicProfileStore {
         var seenIdentifiers: Set<String> = []
         return tracks.filter { track in
             seenIdentifiers.insert(trackIdentifier(track)).inserted
+        }
+    }
+
+    private func deduplicatedCollections(_ collections: [MusicCollection]) -> [MusicCollection] {
+        var seenIdentifiers: Set<String> = []
+        return collections.filter { collection in
+            seenIdentifiers.insert(collection.id).inserted
+        }
+    }
+
+    private func orderedUniqueStrings(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.compactMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return nil }
+            let key = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard seen.insert(key).inserted else { return nil }
+            return trimmed
         }
     }
 

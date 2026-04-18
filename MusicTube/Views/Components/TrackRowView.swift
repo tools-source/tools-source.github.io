@@ -1,7 +1,5 @@
 import SwiftUI
 
-// MARK: - DownloadButton
-
 struct DownloadButton: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var downloadService = DownloadService.shared
@@ -11,8 +9,8 @@ struct DownloadButton: View {
 
     var body: some View {
         let downloading = downloadService.isDownloading(track)
-        let downloaded  = downloadService.isDownloaded(track)
-        let progress    = downloadService.downloadProgress(for: track)
+        let downloaded = downloadService.isDownloaded(track)
+        let progress = downloadService.downloadProgress(for: track)
 
         Button {
             appState.downloadTrack(track)
@@ -21,10 +19,8 @@ struct DownloadButton: View {
                 Circle().fill(Color.white.opacity(0.10))
 
                 if downloading {
-                    // Background track
                     Circle()
                         .stroke(Color.white.opacity(0.15), lineWidth: 2.5)
-                    // Progress arc
                     Circle()
                         .trim(from: 0, to: progress)
                         .stroke(Color.cyan, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
@@ -50,7 +46,46 @@ struct DownloadButton: View {
     }
 }
 
-// MARK: - TrackRowView
+struct TrackActionsButton: View {
+    @EnvironmentObject private var appState: AppState
+    let track: Track
+    var size: CGFloat = 36
+
+    var body: some View {
+        Menu {
+            Button {
+                appState.toggleTrackSaved(track)
+            } label: {
+                Label(
+                    appState.isTrackSaved(track) ? "Remove From Library" : "Save To Library",
+                    systemImage: appState.isTrackSaved(track) ? "bookmark.slash" : "bookmark"
+                )
+            }
+
+            Button {
+                appState.presentPlaylistPicker(for: track)
+            } label: {
+                Label("Add To Playlist", systemImage: "text.badge.plus")
+            }
+
+            Button {
+                appState.toggleLike(for: track)
+            } label: {
+                Label(
+                    appState.isTrackLiked(track) ? "Unlike" : "Like",
+                    systemImage: appState.isTrackLiked(track) ? "heart.slash" : "heart"
+                )
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: size, height: size)
+                .background(Circle().fill(Color.white.opacity(0.10)))
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 struct TrackRowView: View {
     @EnvironmentObject private var appState: AppState
@@ -88,6 +123,12 @@ struct TrackRowView: View {
                                     .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
                             }
 
+                            if appState.isTrackSaved(track) {
+                                Image(systemName: "bookmark.fill")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color.white.opacity(0.75))
+                            }
+
                             if downloadService.isDownloaded(track) {
                                 Image(systemName: "arrow.down.circle.fill")
                                     .font(.caption2.weight(.semibold))
@@ -109,6 +150,8 @@ struct TrackRowView: View {
             if showsDownloadButton {
                 DownloadButton(track: track, size: 36)
             }
+
+            TrackActionsButton(track: track, size: 36)
 
             Button(action: handlePlaybackButtonTap) {
                 Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")

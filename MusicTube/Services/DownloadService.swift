@@ -9,6 +9,7 @@ struct DownloadRecord: Codable, Identifiable, Sendable {
     let fileName: String
     let downloadedAt: Date
     var fileSizeBytes: Int64
+    var folderID: String?
 
     var localURL: URL {
         DownloadService.downloadsDirectory.appendingPathComponent(fileName)
@@ -27,12 +28,18 @@ struct DownloadRecord: Codable, Identifiable, Sendable {
     }
 }
 
+struct DownloadFolder: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    var name: String
+    let createdAt: Date
+}
+
 // MARK: - ActiveDownload
 
 struct ActiveDownload: Identifiable {
-    let id: String   // youtubeVideoID or track.id
+    let id: String
     let track: Track
-    var progress: Double   // 0.0 – 1.0
+    var progress: Double
     var isFailed: Bool
 }
 
@@ -49,6 +56,7 @@ final class DownloadService: NSObject, ObservableObject {
     }
 
     @Published private(set) var downloads: [DownloadRecord] = []
+    @Published private(set) var folders: [DownloadFolder] = []
     @Published private(set) var activeDownloads: [String: ActiveDownload] = [:]
 
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
@@ -64,16 +72,17 @@ final class DownloadService: NSObject, ObservableObject {
         Self.downloadsDirectory.appendingPathComponent("metadata.json")
     }
 
-    // MARK: Init
+    private var foldersURL: URL {
+        Self.downloadsDirectory.appendingPathComponent("folders.json")
+    }
 
     override init() {
         super.init()
         createDirectoryIfNeeded()
         loadMetadata()
+        loadFolders()
         pruneOrphanedRecords()
     }
-
-    // MARK: Public Query API
 
     func isDownloaded(_ track: Track) -> Bool {
         let key = trackKey(track)
@@ -93,10 +102,15 @@ final class DownloadService: NSObject, ObservableObject {
         return downloads.first { trackKey($0.track) == key }
     }
 
-    // MARK: Download Control
+    func downloads(in folderID: String?) -> [DownloadRecord] {
+        downloads.filter { $0.folderID == folderID }
+    }
 
-    /// Starts a download using a pre-resolved stream URL.
-    /// Call resolveStreamURL(for:) on PlaybackService first, then pass the result here.
+    func folder(for record: DownloadRecord) -> DownloadFolder? {
+        guard let folderID = record.folderID else { return nil }
+        return folders.first(where: { $0.id == folderID })
+    }
+
     func startDownload(track: Track, streamURL: URL) {
         let key = trackKey(track)
         guard activeDownloads[key] == nil, !isDownloaded(track) else { return }
@@ -134,7 +148,8 @@ final class DownloadService: NSObject, ObservableObject {
                         track: track,
                         fileName: fileName,
                         downloadedAt: Date(),
-                        fileSizeBytes: fileSize
+                        fileSizeBytes: fileSize,
+                        folderID: nil
                     )
                     self.downloads.append(record)
                     self.saveMetadata()
@@ -186,11 +201,42 @@ final class DownloadService: NSObject, ObservableObject {
 
         try? FileManager.default.removeItem(at: Self.downloadsDirectory)
         downloads = []
+        folders = []
         createDirectoryIfNeeded()
+        saveMetadata()
+        saveFolders()
+    }
+
+    func createFolder(named name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else { return }
+
+        let folder = DownloadFolder(
+            id: "download-folder-\(UUID().uuidString)",
+            name: trimmedName,
+            createdAt: Date()
+        )
+
+        folders.insert(folder, at: 0)
+        saveFolders()
+    }
+
+    func deleteFolder(_ folder: DownloadFolder) {
+        folders.removeAll { $0.id == folder.id }
+
+        for index in downloads.indices where downloads[index].folderID == folder.id {
+            downloads[index].folderID = nil
+        }
+
+        saveFolders()
         saveMetadata()
     }
 
-    // MARK: Computed
+    func moveDownload(_ record: DownloadRecord, to folderID: String?) {
+        guard let index = downloads.firstIndex(where: { $0.id == record.id }) else { return }
+        downloads[index].folderID = folderID
+        saveMetadata()
+    }
 
     var totalDownloadedBytes: Int64 {
         downloads.reduce(0) { $0 + $1.fileSizeBytes }
@@ -199,8 +245,6 @@ final class DownloadService: NSObject, ObservableObject {
     var totalDownloadedMB: Double {
         Double(totalDownloadedBytes) / 1_048_576
     }
-
-    // MARK: Private helpers
 
     private func trackKey(_ track: Track) -> String {
         track.youtubeVideoID ?? track.id
@@ -228,6 +272,19 @@ final class DownloadService: NSObject, ObservableObject {
         downloads = records
     }
 
+    private func loadFolders() {
+        guard let data = try? Data(contentsOf: foldersURL),
+              let decodedFolders = try? JSONDecoder().decode([DownloadFolder].self, from: data)
+        else { return }
+
+        folders = decodedFolders.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt > rhs.createdAt
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     private func pruneOrphanedRecords() {
         let existing = downloads.filter {
             FileManager.default.fileExists(atPath: $0.localURL.path)
@@ -241,5 +298,10 @@ final class DownloadService: NSObject, ObservableObject {
     private func saveMetadata() {
         guard let data = try? JSONEncoder().encode(downloads) else { return }
         try? data.write(to: metadataURL, options: .atomic)
+    }
+
+    private func saveFolders() {
+        guard let data = try? JSONEncoder().encode(folders) else { return }
+        try? data.write(to: foldersURL, options: .atomic)
     }
 }

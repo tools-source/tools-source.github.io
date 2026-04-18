@@ -14,7 +14,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private actor SearchCache {
         private struct Entry {
-            let tracks: [Track]
+            let response: SearchResponse
             let timestamp: Date
         }
 
@@ -22,17 +22,17 @@ final class YouTubeAPIService: MusicCatalogProviding {
         private let maxAge: TimeInterval = 300
         private let maxEntries = 80
 
-        func results(for key: String) -> [Track]? {
+        func results(for key: String) -> SearchResponse? {
             guard let entry = entries[key] else { return nil }
             guard Date().timeIntervalSince(entry.timestamp) < maxAge else {
                 entries.removeValue(forKey: key)
                 return nil
             }
-            return entry.tracks
+            return entry.response
         }
 
-        func store(_ tracks: [Track], for key: String) {
-            entries[key] = Entry(tracks: tracks, timestamp: Date())
+        func store(_ response: SearchResponse, for key: String) {
+            entries[key] = Entry(response: response, timestamp: Date())
 
             if entries.count > maxEntries {
                 let staleKeys = entries
@@ -63,7 +63,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         try await loadAuthorizedHome(accessToken: accessToken)
     }
 
-    func search(query: String, accessToken: String) async throws -> [Track] {
+    func search(query: String, accessToken: String?) async throws -> SearchResponse {
         let cacheKey = normalizedSearchCacheKey(for: query)
         if let cachedResults = await searchCache.results(for: cacheKey) {
             return cachedResults
@@ -74,44 +74,76 @@ final class YouTubeAPIService: MusicCatalogProviding {
         return results
     }
 
-    private func performSearch(query: String, accessToken: String) async throws -> [Track] {
+    private func performSearch(query: String, accessToken: String?) async throws -> SearchResponse {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.isEmpty == false else { return .empty }
+
+        var trackSearchError: Error?
+        let songs: [Track]
+
+        do {
+            songs = try await performTrackSearch(query: trimmedQuery, accessToken: accessToken)
+        } catch {
+            trackSearchError = error
+            songs = []
+        }
+
+        let collections = (try? await performCollectionSearch(query: trimmedQuery)) ??
+            (playlists: [], albums: [], artists: [])
+        let response = SearchResponse(
+            songs: songs,
+            playlists: collections.playlists,
+            albums: collections.albums,
+            artists: collections.artists
+        )
+
+        if response.isEmpty, let trackSearchError {
+            throw trackSearchError
+        }
+
+        return response
+    }
+
+    private func performTrackSearch(query: String, accessToken: String?) async throws -> [Track] {
         if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 25),
            innerTubeResults.isEmpty == false {
             return innerTubeResults
         }
 
-        do {
-            let musicResults = try await fetchSearchResults(
-                query: query,
-                accessToken: accessToken,
-                maxResults: 25
-            )
-            if musicResults.isEmpty == false {
-                return musicResults
-            }
-
-            let broaderResults = try await fetchSearchResults(
-                query: query,
-                accessToken: accessToken,
-                maxResults: 25,
-                musicOnly: false
-            )
-            if broaderResults.isEmpty == false {
-                return broaderResults
-            }
-        } catch {
-            if let apiKey = validatedAPIKey {
-                let fallbackResults = try? await fetchSearchResults(
+        if let accessToken {
+            do {
+                let musicResults = try await fetchSearchResults(
                     query: query,
-                    apiKey: apiKey,
+                    accessToken: accessToken,
                     maxResults: 25
                 )
-                if let fallbackResults, fallbackResults.isEmpty == false {
-                    return fallbackResults
+                if musicResults.isEmpty == false {
+                    return musicResults
                 }
-            }
 
-            throw error
+                let broaderResults = try await fetchSearchResults(
+                    query: query,
+                    accessToken: accessToken,
+                    maxResults: 25,
+                    musicOnly: false
+                )
+                if broaderResults.isEmpty == false {
+                    return broaderResults
+                }
+            } catch {
+                if let apiKey = validatedAPIKey {
+                    let fallbackResults = try? await fetchSearchResults(
+                        query: query,
+                        apiKey: apiKey,
+                        maxResults: 25
+                    )
+                    if let fallbackResults, fallbackResults.isEmpty == false {
+                        return fallbackResults
+                    }
+                }
+
+                throw error
+            }
         }
 
         if let apiKey = validatedAPIKey {
@@ -396,6 +428,36 @@ final class YouTubeAPIService: MusicCatalogProviding {
         )
     }
 
+    func loadCollectionItems(for collection: MusicCollection, accessToken: String?) async throws -> [Track] {
+        switch collection.kind {
+        case .playlist, .album:
+            if let accessToken {
+                return try await fetchPlaylistItems(
+                    playlistID: collection.sourceID,
+                    accessToken: accessToken,
+                    maxItems: 120
+                )
+            }
+
+            if let apiKey = validatedAPIKey {
+                return try await fetchPlaylistItems(
+                    playlistID: collection.sourceID,
+                    apiKey: apiKey,
+                    maxItems: 120
+                )
+            }
+
+            return Array(try await performTrackSearch(query: collection.queryHint, accessToken: nil).prefix(50))
+
+        case .artist:
+            return try await fetchArtistTracks(
+                for: collection,
+                accessToken: accessToken,
+                maxItems: 60
+            )
+        }
+    }
+
     func setLikeStatus(for track: Track, isLiked: Bool, accessToken: String) async throws {
         let videoID = track.youtubeVideoID ?? track.id
         guard videoID.isEmpty == false else {
@@ -672,7 +734,56 @@ final class YouTubeAPIService: MusicCatalogProviding {
         )
     }
 
+    private func performCollectionSearch(query: String) async throws -> (playlists: [MusicCollection], albums: [MusicCollection], artists: [MusicCollection]) {
+        let object = try await fetchInnerTubeSearchPayload(query: query)
+        let playlistRenderers = collectObjects(matchingKey: "playlistRenderer", in: object)
+        let channelRenderers = collectObjects(matchingKey: "channelRenderer", in: object)
+
+        var playlists = deduplicatedCollections(
+            playlistRenderers
+                .compactMap { musicCollection(fromInnerTubePlaylistRenderer: $0) }
+                .filter { $0.kind == .playlist }
+        )
+        var albums = deduplicatedCollections(
+            playlistRenderers
+                .compactMap { musicCollection(fromInnerTubePlaylistRenderer: $0) }
+                .filter { $0.kind == .album }
+        )
+        let artists = deduplicatedCollections(
+            channelRenderers.compactMap(musicCollection(fromInnerTubeChannelRenderer:))
+        )
+
+        if albums.count < 6 {
+            let albumPayload = try? await fetchInnerTubeSearchPayload(query: "\(query) album")
+            if let albumPayload {
+                let albumRenderers = collectObjects(matchingKey: "playlistRenderer", in: albumPayload)
+                albums = deduplicatedCollections(
+                    albums + albumRenderers.compactMap {
+                        musicCollection(fromInnerTubePlaylistRenderer: $0, forceAlbum: true)
+                    }
+                )
+            }
+        }
+
+        if playlists.count > 12 {
+            playlists = Array(playlists.prefix(12))
+        }
+        if albums.count > 12 {
+            albums = Array(albums.prefix(12))
+        }
+
+        return (playlists, albums, artists)
+    }
+
     private func fetchSearchResultsViaInnerTube(query: String, maxResults: Int) async throws -> [Track] {
+        let object = try await fetchInnerTubeSearchPayload(query: query)
+        let renderers = collectObjects(matchingKey: "videoRenderer", in: object)
+
+        let tracks = renderers.compactMap(track(fromInnerTubeVideoRenderer:))
+        return Array(deduplicatedTracks(tracks).prefix(maxResults))
+    }
+
+    private func fetchInnerTubeSearchPayload(query: String) async throws -> Any {
         var request = URLRequest(url: innerTubeSearchURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -697,11 +808,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
             throw APIError.serviceError("YouTube internal search returned status \(httpResponse.statusCode).")
         }
 
-        let object = try JSONSerialization.jsonObject(with: data)
-        let renderers = collectObjects(matchingKey: "videoRenderer", in: object)
-
-        let tracks = renderers.compactMap(track(fromInnerTubeVideoRenderer:))
-        return Array(deduplicatedTracks(tracks).prefix(maxResults))
+        return try JSONSerialization.jsonObject(with: data)
     }
 
     private func collectObjects(matchingKey key: String, in object: Any) -> [[String: Any]] {
@@ -758,6 +865,58 @@ final class YouTubeAPIService: MusicCatalogProviding {
         )
     }
 
+    private func musicCollection(fromInnerTubePlaylistRenderer renderer: [String: Any], forceAlbum: Bool? = nil) -> MusicCollection? {
+        guard let playlistID = renderer["playlistId"] as? String else { return nil }
+
+        let title = text(from: renderer["title"]) ?? "Playlist"
+        let subtitle =
+            text(from: renderer["shortBylineText"]) ??
+            text(from: renderer["longBylineText"]) ??
+            "YouTube"
+        let description = text(from: renderer["descriptionSnippet"]) ?? subtitle
+        let itemCount = parseCount(
+            from: text(from: renderer["videoCountText"]) ??
+                text(from: renderer["videoCountShortText"]) ??
+                text(from: renderer["thumbnailOverlays"])
+        )
+        let artworkURL = extractThumbnailURL(from: renderer)
+        let resolvedIsAlbum = forceAlbum ?? isLikelyAlbum(title: title, subtitle: subtitle, description: description)
+        let kind: MusicCollectionKind = resolvedIsAlbum ? .album : .playlist
+
+        return MusicCollection(
+            sourceID: playlistID,
+            title: title,
+            subtitle: subtitle,
+            description: description,
+            artworkURL: artworkURL,
+            itemCount: itemCount,
+            kind: kind,
+            queryHint: [title, subtitle].filter { $0.isEmpty == false }.joined(separator: " ")
+        )
+    }
+
+    private func musicCollection(fromInnerTubeChannelRenderer renderer: [String: Any]) -> MusicCollection? {
+        guard let channelID = renderer["channelId"] as? String else { return nil }
+
+        let title = cleanArtistName(text(from: renderer["title"]) ?? "Artist")
+        let subtitle = text(from: renderer["subscriberCountText"]) ?? "Artist"
+        let description = text(from: renderer["descriptionSnippet"]) ?? subtitle
+        let artworkURL = extractThumbnailURL(from: renderer)
+
+        guard isNonMusicContent(title: description, channel: title) == false else { return nil }
+
+        return MusicCollection(
+            sourceID: channelID,
+            title: title,
+            subtitle: subtitle,
+            description: description,
+            artworkURL: artworkURL,
+            itemCount: 0,
+            kind: .artist,
+            queryHint: title
+        )
+    }
+
     private func text(from object: Any?) -> String? {
         guard let dictionary = object as? [String: Any] else { return nil }
 
@@ -784,6 +943,50 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
 
         return URL(string: urlString)
+    }
+
+    private func extractThumbnailURL(from object: Any?) -> URL? {
+        if let url = bestThumbnailURL(from: object) {
+            return url
+        }
+
+        if let dictionary = object as? [String: Any] {
+            for value in dictionary.values {
+                if let url = extractThumbnailURL(from: value) {
+                    return url
+                }
+            }
+        }
+
+        if let array = object as? [Any] {
+            for value in array {
+                if let url = extractThumbnailURL(from: value) {
+                    return url
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func parseCount(from text: String?) -> Int {
+        guard let text else { return 0 }
+        let digits = text.unicodeScalars.filter(CharacterSet.decimalDigits.contains)
+        let numericString = String(String.UnicodeScalarView(digits))
+        return Int(numericString) ?? 0
+    }
+
+    private func isLikelyAlbum(title: String, subtitle: String, description: String) -> Bool {
+        let searchableText = "\(title) \(subtitle) \(description)".lowercased()
+        if searchableText.contains("album") {
+            return true
+        }
+
+        if searchableText.contains(" - topic") && searchableText.contains("playlist") == false {
+            return true
+        }
+
+        return false
     }
 
     private func authorizedRequest(url: URL, accessToken: String) -> URLRequest {
@@ -922,6 +1125,45 @@ final class YouTubeAPIService: MusicCatalogProviding {
         accessToken: String,
         maxItems: Int
     ) async throws -> [Track] {
+        try await fetchPlaylistItems(
+            playlistID: playlist.id,
+            accessToken: accessToken,
+            maxItems: maxItems
+        )
+    }
+
+    private func fetchPlaylistItems(
+        playlistID: String,
+        accessToken: String,
+        maxItems: Int
+    ) async throws -> [Track] {
+        try await fetchPlaylistItems(
+            playlistID: playlistID,
+            queryItems: authorizedQueryItems([]),
+            accessToken: accessToken,
+            maxItems: maxItems
+        )
+    }
+
+    private func fetchPlaylistItems(
+        playlistID: String,
+        apiKey: String,
+        maxItems: Int
+    ) async throws -> [Track] {
+        try await fetchPlaylistItems(
+            playlistID: playlistID,
+            queryItems: [URLQueryItem(name: "key", value: apiKey)],
+            accessToken: nil,
+            maxItems: maxItems
+        )
+    }
+
+    private func fetchPlaylistItems(
+        playlistID: String,
+        queryItems additionalQueryItems: [URLQueryItem],
+        accessToken: String?,
+        maxItems: Int
+    ) async throws -> [Track] {
         var entries: [PlaylistEntry] = []
         var nextPageToken: String?
 
@@ -929,18 +1171,25 @@ final class YouTubeAPIService: MusicCatalogProviding {
             var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/playlistItems")!
             var queryItems = [
                 URLQueryItem(name: "part", value: "snippet,contentDetails"),
-                URLQueryItem(name: "playlistId", value: playlist.id),
+                URLQueryItem(name: "playlistId", value: playlistID),
                 URLQueryItem(name: "maxResults", value: "50")
             ]
+            queryItems.append(contentsOf: additionalQueryItems)
 
             if let nextPageToken {
                 queryItems.append(URLQueryItem(name: "pageToken", value: nextPageToken))
             }
 
-            components.queryItems = authorizedQueryItems(queryItems)
+            components.queryItems = queryItems
 
-            let request = authorizedRequest(url: components.url!, accessToken: accessToken)
-            let (data, urlResponse) = try await urlSession.data(for: request)
+            let data: Data
+            let urlResponse: URLResponse
+            if let accessToken {
+                let request = authorizedRequest(url: components.url!, accessToken: accessToken)
+                (data, urlResponse) = try await urlSession.data(for: request)
+            } else {
+                (data, urlResponse) = try await urlSession.data(from: components.url!)
+            }
             let response = try decodeResponse(PlaylistItemsResponse.self, from: data, response: urlResponse)
 
             entries.append(contentsOf: response.items)
@@ -968,6 +1217,84 @@ final class YouTubeAPIService: MusicCatalogProviding {
         return tracks
     }
 
+    private func fetchArtistTracks(
+        for collection: MusicCollection,
+        accessToken: String?,
+        maxItems: Int
+    ) async throws -> [Track] {
+        if let accessToken {
+            let results = try await fetchArtistTracks(
+                query: collection.queryHint,
+                channelID: collection.sourceID,
+                accessToken: accessToken,
+                maxItems: maxItems
+            )
+            if results.isEmpty == false {
+                return results
+            }
+        }
+
+        if let apiKey = validatedAPIKey {
+            let results = try await fetchArtistTracks(
+                query: collection.queryHint,
+                channelID: collection.sourceID,
+                apiKey: apiKey,
+                maxResults: maxItems
+            )
+            if results.isEmpty == false {
+                return results
+            }
+        }
+
+        return Array(try await performTrackSearch(query: "\(collection.title) official audio", accessToken: accessToken).prefix(maxItems))
+    }
+
+    private func fetchArtistTracks(
+        query: String,
+        channelID: String,
+        accessToken: String,
+        maxItems: Int
+    ) async throws -> [Track] {
+        var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/search")!
+        components.queryItems = [
+            URLQueryItem(name: "part", value: "snippet"),
+            URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "safeSearch", value: "moderate"),
+            URLQueryItem(name: "videoCategoryId", value: "10"),
+            URLQueryItem(name: "channelId", value: channelID),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "maxResults", value: String(maxItems))
+        ]
+
+        let request = authorizedRequest(url: components.url!, accessToken: accessToken)
+        let (data, urlResponse) = try await urlSession.data(for: request)
+        let response = try decodeResponse(VideoSearchResponse.self, from: data, response: urlResponse)
+        return response.items.compactMap(track(from:))
+    }
+
+    private func fetchArtistTracks(
+        query: String,
+        channelID: String,
+        apiKey: String,
+        maxResults: Int
+    ) async throws -> [Track] {
+        var components = URLComponents(string: "https://www.googleapis.com/youtube/v3/search")!
+        components.queryItems = [
+            URLQueryItem(name: "part", value: "snippet"),
+            URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "safeSearch", value: "moderate"),
+            URLQueryItem(name: "videoCategoryId", value: "10"),
+            URLQueryItem(name: "channelId", value: channelID),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "maxResults", value: String(maxResults)),
+            URLQueryItem(name: "key", value: apiKey)
+        ]
+
+        let (data, urlResponse) = try await urlSession.data(from: components.url!)
+        let response = try decodeResponse(VideoSearchResponse.self, from: data, response: urlResponse)
+        return response.items.compactMap(track(from:))
+    }
+
     private func prioritizedLibraryPlaylists(_ playlists: [Playlist]) -> [Playlist] {
         let deduplicated = deduplicatedPlaylists(playlists)
         let likedPlaylists = deduplicated.filter { $0.kind == .likedMusic }
@@ -987,6 +1314,13 @@ final class YouTubeAPIService: MusicCatalogProviding {
         return tracks.filter { track in
             let dedupeID = track.youtubeVideoID ?? track.id
             return seenIDs.insert(dedupeID).inserted
+        }
+    }
+
+    private func deduplicatedCollections(_ collections: [MusicCollection]) -> [MusicCollection] {
+        var seenIDs: Set<String> = []
+        return collections.filter { collection in
+            seenIDs.insert(collection.id).inserted
         }
     }
 

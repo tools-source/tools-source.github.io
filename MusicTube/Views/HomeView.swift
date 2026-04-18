@@ -18,6 +18,7 @@ struct HomeView: View {
     @State private var seeAllTitle: String = ""
     @State private var seeAllTracks: [Track] = []
     @State private var showSeeAll = false
+    @State private var recommendedVisibleCount = 10
 
     var body: some View {
         NavigationStack {
@@ -55,6 +56,12 @@ struct HomeView: View {
                     await appState.refreshDashboard()
                 }
             }
+            .onChange(of: selectedFilter) { _, _ in
+                recommendedVisibleCount = 10
+            }
+            .onChange(of: appState.featuredTracks) { _, newTracks in
+                recommendedVisibleCount = min(max(recommendedVisibleCount, 10), max(newTracks.count, 10))
+            }
             .background(Color.black.ignoresSafeArea())
             .sheet(isPresented: $showSeeAll) {
                 TrackListSheet(title: seeAllTitle, tracks: seeAllTracks)
@@ -71,17 +78,34 @@ struct HomeView: View {
                 Text(greeting)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.6))
-                if let name = appState.user?.name.components(separatedBy: " ").first {
-                    Text(name)
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(.white)
-                }
+                Text(displayName)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(appState.isYouTubeConnected ? "Connected to YouTube" : "Guest mode, with local recommendations")
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.48))
             }
 
             Spacer()
 
-            // Avatar
-            if let user = appState.user {
+            if appState.isYouTubeConnected == false {
+                Button {
+                    Task {
+                        await appState.signIn()
+                    }
+                } label: {
+                    Text("Connect")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+            } else if let user = appState.user {
                 ZStack {
                     Circle()
                         .fill(Color(red: 0.85, green: 0.22, blue: 0.22))
@@ -92,6 +116,13 @@ struct HomeView: View {
                 }
             }
         }
+    }
+
+    private var displayName: String {
+        if let name = appState.user?.name.components(separatedBy: " ").first, name.isEmpty == false {
+            return name
+        }
+        return "Guest"
     }
 
     private var greeting: String {
@@ -170,12 +201,9 @@ struct HomeView: View {
     @ViewBuilder
     private var recommendedSection: some View {
         let tracks = filteredRecommended
+        let displayedTracks = Array(tracks.prefix(recommendedVisibleCount))
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(title: "Recommended for you", showSeeAll: !tracks.isEmpty) {
-                seeAllTitle = "Recommended for you"
-                seeAllTracks = tracks
-                showSeeAll = true
-            }
+            sectionHeader(title: "Recommended for you", showSeeAll: false) {}
             .padding(.horizontal, 20)
 
             if !appState.hasLoadedHome || (appState.isLoading && tracks.isEmpty) {
@@ -186,11 +214,15 @@ struct HomeView: View {
                     .padding(.horizontal, 20)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(tracks.prefix(10).enumerated()), id: \.element.id) { index, track in
+                    ForEach(Array(displayedTracks.enumerated()), id: \.element.id) { index, track in
                         RecommendedRow(track: track) {
                             appState.play(track: track, queue: Array(tracks))
                         }
-                        if index < min(tracks.count, 10) - 1 {
+                        .onAppear {
+                            handleRecommendedRowAppearance(index: index, displayedCount: displayedTracks.count, totalCount: tracks.count)
+                        }
+
+                        if index < displayedTracks.count - 1 {
                             Divider()
                                 .overlay(Color.white.opacity(0.06))
                                 .padding(.leading, 76)
@@ -198,6 +230,18 @@ struct HomeView: View {
                     }
                 }
                 .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    private func handleRecommendedRowAppearance(index: Int, displayedCount: Int, totalCount: Int) {
+        guard index >= displayedCount - 2 else { return }
+
+        if recommendedVisibleCount < totalCount {
+            recommendedVisibleCount = min(recommendedVisibleCount + 10, totalCount)
+        } else {
+            Task {
+                await appState.loadMoreRecommendedTracksIfNeeded()
             }
         }
     }
@@ -441,7 +485,7 @@ private struct ContinueListeningCard: View {
 
 // MARK: - RecommendedRow
 
-private struct RecommendedRow: View {
+struct RecommendedRow: View {
     @EnvironmentObject private var appState: AppState
 
     let track: Track
@@ -532,6 +576,8 @@ private struct MixCard: View {
         switch playlist.kind {
         case .likedMusic: return count == 1 ? "1 song" : "\(count) songs"
         case .uploads:    return count == 1 ? "1 upload" : "\(count) uploads"
+        case .savedSongs: return count == 1 ? "1 saved song" : "\(count) saved songs"
+        case .custom:     return count == 1 ? "1 track" : "\(count) tracks"
         case .standard:   return count == 1 ? "1 track" : "\(count) tracks"
         }
     }
@@ -654,6 +700,7 @@ private struct HomeTrackButtons: View {
     var body: some View {
         HStack(spacing: 8) {
             DownloadButton(track: track, size: buttonSize)
+            TrackActionsButton(track: track, size: buttonSize)
 
             Button(action: handlePlaybackButtonTap) {
                 Image(systemName: isCurrentTrack && appState.isPlaying ? "pause.fill" : "play.fill")
