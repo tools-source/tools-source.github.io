@@ -105,7 +105,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
     func toggleShuffle() {
         shuffleMode.toggle()
-        guard playbackQueue.isEmpty == false else { return }
+        guard playbackQueue.isEmpty == false else {
+            updateCommandAvailability()
+            return
+        }
 
         if shuffleMode {
             // Save original, shuffle remaining (keep current track at index)
@@ -132,6 +135,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             }
         }
         updateQueueState()
+        updateCommandAvailability()
     }
 
     func cycleRepeatMode() {
@@ -140,6 +144,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
+        updateCommandAvailability()
     }
 
     /// Eagerly warms the stream cache for a list of tracks (call when tracks first appear on screen).
@@ -329,7 +334,9 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             commandCenter.togglePlayPauseCommand,
             commandCenter.nextTrackCommand,
             commandCenter.previousTrackCommand,
-            commandCenter.changePlaybackPositionCommand
+            commandCenter.changePlaybackPositionCommand,
+            commandCenter.changeRepeatModeCommand,
+            commandCenter.changeShuffleModeCommand
         ].forEach { $0.removeTarget(nil) }
 
         commandCenter.playCommand.isEnabled = true
@@ -338,6 +345,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         commandCenter.nextTrackCommand.isEnabled = false
         commandCenter.previousTrackCommand.isEnabled = false
         commandCenter.changePlaybackPositionCommand.isEnabled = false
+        commandCenter.changeRepeatModeCommand.isEnabled = true
+        commandCenter.changeShuffleModeCommand.isEnabled = true
 
         commandCenter.playCommand.addTarget { [weak self] _ in
             Task { @MainActor in
@@ -384,6 +393,30 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             }
             return .success
         }
+
+        commandCenter.changeRepeatModeCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangeRepeatModeCommandEvent else {
+                return .commandFailed
+            }
+
+            Task { @MainActor in
+                self?.applyRepeatType(event.repeatType)
+            }
+            return .success
+        }
+
+        commandCenter.changeShuffleModeCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangeShuffleModeCommandEvent else {
+                return .commandFailed
+            }
+
+            Task { @MainActor in
+                self?.applyShuffleType(event.shuffleType)
+            }
+            return .success
+        }
+
+        updateCommandAvailability()
     }
 
     private func updateNowPlayingInfo(for track: Track) {
@@ -1032,6 +1065,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         commandCenter.nextTrackCommand.isEnabled = hasNextTrack
         commandCenter.previousTrackCommand.isEnabled = hasPreviousTrack
         commandCenter.changePlaybackPositionCommand.isEnabled = duration > 0
+        commandCenter.changeShuffleModeCommand.currentShuffleType = shuffleMode ? .items : .off
+        commandCenter.changeRepeatModeCommand.currentRepeatType = currentRemoteRepeatType
     }
 
     private func cachedStreamCandidates(for track: Track) -> [URL]? {
@@ -1128,7 +1163,17 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
 
         let youtube = YouTube(videoID: videoID, methods: [.local, .remote])
-        let streams = try await youtube.streams
+        let streams: [Stream]
+        do {
+            streams = try await youtube.streams
+        } catch {
+            let liveCandidates = (try? await extractLivestreamCandidates(from: youtube)) ?? []
+            if liveCandidates.isEmpty == false {
+                return liveCandidates
+            }
+            throw error
+        }
+
         let preferredStreams = preferredPlaybackStreams(from: streams)
         let candidateURLs = deduplicatedURLs(preferredStreams.map(\.url))
 
@@ -1143,7 +1188,53 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return candidateURLs
         }
 
+        let liveCandidates = try await extractLivestreamCandidates(from: youtube)
+        if liveCandidates.isEmpty == false {
+            return liveCandidates
+        }
+
         throw PlaybackError.noPlayableStream
+    }
+
+    private func extractLivestreamCandidates(from youtube: YouTube) async throws -> [URL] {
+        let livestreams = try await youtube.livestreams
+        return deduplicatedURLs(livestreams.map(\.url))
+    }
+
+    private var currentRemoteRepeatType: MPRepeatType {
+        switch repeatMode {
+        case .off:
+            return .off
+        case .one:
+            return .one
+        case .all:
+            return .all
+        }
+    }
+
+    private func applyRepeatType(_ repeatType: MPRepeatType) {
+        switch repeatType {
+        case .off:
+            repeatMode = .off
+        case .one:
+            repeatMode = .one
+        case .all:
+            repeatMode = .all
+        default:
+            break
+        }
+
+        updateCommandAvailability()
+    }
+
+    private func applyShuffleType(_ shuffleType: MPShuffleType) {
+        let shouldShuffle = shuffleType != .off
+        guard shuffleMode != shouldShuffle else {
+            updateCommandAvailability()
+            return
+        }
+
+        toggleShuffle()
     }
 
     private func preferredPlaybackStreams(from streams: [Stream]) -> [Stream] {

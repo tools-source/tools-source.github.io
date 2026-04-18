@@ -18,10 +18,16 @@ final class CarPlayManager: NSObject {
     private var forYouTemplate: CPListTemplate?
     private var libraryTemplate: CPListTemplate?
     private var downloadsTemplate: CPListTemplate?
+    private var downloadFolderTemplates: [String: CPListTemplate] = [:]
     private var tabTemplate: CPTabBarTemplate?
+    private let allDownloadsTemplateKey = "__all_downloads__"
 
     // Artwork cache (URL → 60×60 UIImage)
-    private let cache = NSCache<NSURL, UIImage>()
+    private let cache: NSCache<NSURL, UIImage> = {
+        let cache = NSCache<NSURL, UIImage>()
+        cache.countLimit = 180
+        return cache
+    }()
 
     // MARK: Lifecycle
 
@@ -36,6 +42,7 @@ final class CarPlayManager: NSObject {
         forYouTemplate = nil
         libraryTemplate = nil
         downloadsTemplate = nil
+        downloadFolderTemplates = [:]
         tabTemplate = nil
     }
 
@@ -46,6 +53,8 @@ final class CarPlayManager: NSObject {
         forYouTemplate?.updateSections(forYouSections(state))
         libraryTemplate?.updateSections(librarySections(state))
         downloadsTemplate?.updateSections(downloadSections(state))
+        updateDownloadFolderTemplates(using: state)
+        updateNowPlayingControls(using: state)
 
         // Batch-fetch artwork for all visible tracks, then do ONE refresh
         let tracks  = Array((state.featuredTracks + state.recentTracks).prefix(30))
@@ -56,6 +65,8 @@ final class CarPlayManager: NSObject {
             // After artwork is cached, rebuild with real images
             self.forYouTemplate?.updateSections(self.forYouSections(state))
             self.libraryTemplate?.updateSections(self.librarySections(state))
+            self.downloadsTemplate?.updateSections(self.downloadSections(state))
+            self.updateDownloadFolderTemplates(using: state)
         }
     }
 
@@ -88,6 +99,7 @@ final class CarPlayManager: NSObject {
         self.tabTemplate      = tab
 
         ic.setRootTemplate(tab, animated: false, completion: nil)
+        updateNowPlayingControls(using: state)
     }
 
     private func makeListTemplate(
@@ -189,9 +201,31 @@ final class CarPlayManager: NSObject {
         guard let state = state ?? self.appState ?? AppContainer.shared.appState else {
             return [section("Downloads", [plain("Connecting…")])]
         }
-        let tracks = Array(records.reversed().map(\.localTrack))
-        return [section("Downloaded · \(tracks.count) songs",
-                        tracks.map { trackRow($0, queue: tracks, state: state) })]
+
+        if DownloadService.shared.folders.isEmpty {
+            let tracks = Array(records.reversed().map(\.localTrack))
+            return [section("Downloaded · \(tracks.count) songs",
+                            tracks.map { trackRow($0, queue: tracks, state: state) })]
+        }
+
+        let allTracks = downloadTracks(in: nil)
+        let browseItems = [downloadFolderRow(title: "All Downloads", folderID: nil, state: state)]
+        let folderItems = DownloadService.shared.folders.map {
+            downloadFolderRow(title: $0.name, folderID: $0.id, state: state)
+        }
+        let recentTracks = Array(allTracks.prefix(12))
+
+        var sections: [CPListSection] = [
+            section("Browse", browseItems),
+            section("Folders", folderItems)
+        ]
+
+        if recentTracks.isEmpty == false {
+            sections.append(section("Recently Downloaded",
+                                    recentTracks.map { trackRow($0, queue: allTracks, state: state) }))
+        }
+
+        return sections
     }
 
     // MARK: Item builders
@@ -216,6 +250,23 @@ final class CarPlayManager: NSObject {
                               accessoryType: .disclosureIndicator)
         item.handler = { [weak self] _, done in
             self?.openPlaylist(playlist, state: state)
+            done()
+        }
+        return item
+    }
+
+    private func downloadFolderRow(title: String, folderID: String?, state: AppState) -> CPListItem {
+        let tracks = downloadTracks(in: folderID)
+        let subtitle = tracks.count == 1 ? "1 song" : "\(tracks.count) songs"
+        let item = CPListItem(
+            text: title,
+            detailText: subtitle,
+            image: UIImage(systemName: folderID == nil ? "square.stack.fill" : "folder.fill"),
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        item.handler = { [weak self] _, done in
+            self?.openDownloadFolder(title: title, folderID: folderID, state: state)
             done()
         }
         return item
@@ -257,12 +308,142 @@ final class CarPlayManager: NSObject {
         }
     }
 
+    private func openDownloadFolder(title: String, folderID: String?, state: AppState) {
+        guard let ic = interfaceController else { return }
+
+        let template = makeListTemplate(
+            title: title,
+            tabTitle: "",
+            tabImage: nil,
+            sections: downloadFolderSections(title: title, folderID: folderID, state: state)
+        )
+        downloadFolderTemplates[downloadTemplateKey(for: folderID)] = template
+        ic.pushTemplate(template, animated: true, completion: nil)
+    }
+
     // MARK: Now Playing
 
     private func showNowPlaying() {
         guard let ic = interfaceController else { return }
+        updateNowPlayingControls(using: appState)
         guard ic.topTemplate !== CPNowPlayingTemplate.shared else { return }
         ic.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+    }
+
+    private func updateNowPlayingControls(using state: AppState?) {
+        guard let state else {
+            CPNowPlayingTemplate.shared.updateNowPlayingButtons([])
+            return
+        }
+
+        guard let nowPlayingTrack = state.nowPlaying else {
+            CPNowPlayingTemplate.shared.updateNowPlayingButtons([])
+            return
+        }
+
+        let downloadService = DownloadService.shared
+        let isLiked = state.isTrackLiked(nowPlayingTrack)
+        let isDownloaded = downloadService.isDownloaded(nowPlayingTrack)
+        let isDownloading = downloadService.isDownloading(nowPlayingTrack)
+
+        let shuffleButton = CPNowPlayingShuffleButton { [weak self, weak state] _ in
+            state?.toggleShuffle()
+            guard let self, let state else { return }
+            self.updateNowPlayingControls(using: state)
+        }
+
+        let repeatButton = CPNowPlayingRepeatButton { [weak self, weak state] _ in
+            state?.cycleRepeatMode()
+            guard let self, let state else { return }
+            self.updateNowPlayingControls(using: state)
+        }
+
+        let likeImageName = isLiked ? "heart.fill" : "heart"
+        let likeButton = CPNowPlayingImageButton(
+            image: UIImage(systemName: likeImageName) ?? UIImage(),
+            handler: { [weak self, weak state] _ in
+                guard let track = state?.nowPlaying else { return }
+                state?.toggleLike(for: track)
+                guard let self, let state else { return }
+                self.updateNowPlayingControls(using: state)
+            }
+        )
+        likeButton.isEnabled = true
+        likeButton.isSelected = isLiked
+
+        let downloadImageName: String
+        if isDownloaded {
+            downloadImageName = "checkmark.circle.fill"
+        } else if isDownloading {
+            downloadImageName = "arrow.down.circle.fill"
+        } else {
+            downloadImageName = "arrow.down.circle"
+        }
+
+        let downloadButton = CPNowPlayingImageButton(
+            image: UIImage(systemName: downloadImageName) ?? UIImage(),
+            handler: { [weak self, weak state] _ in
+                state?.downloadNowPlaying()
+                guard let self, let state else { return }
+                self.updateNowPlayingControls(using: state)
+            }
+        )
+        downloadButton.isEnabled = !isDownloaded && !isDownloading
+        downloadButton.isSelected = isDownloaded
+
+        CPNowPlayingTemplate.shared.updateNowPlayingButtons([
+            shuffleButton,
+            repeatButton,
+            likeButton,
+            downloadButton
+        ])
+    }
+
+    private func updateDownloadFolderTemplates(using state: AppState) {
+        for (key, template) in downloadFolderTemplates {
+            let folderID = key == allDownloadsTemplateKey ? nil : key
+            template.updateSections(
+                downloadFolderSections(
+                    title: template.title ?? "Downloads",
+                    folderID: folderID,
+                    state: state
+                )
+            )
+        }
+    }
+
+    private func downloadFolderSections(title: String, folderID: String?, state: AppState) -> [CPListSection] {
+        let tracks = downloadTracks(in: folderID)
+        guard tracks.isEmpty == false else {
+            let emptyMessage = folderID == nil ? "No downloads yet." : "This folder is empty."
+            return [section(title, [plain(emptyMessage)])]
+        }
+
+        let header = tracks.count == 1
+            ? "\(title) · 1 song"
+            : "\(title) · \(tracks.count) songs"
+
+        return [
+            section(
+                header,
+                tracks.map { trackRow($0, queue: tracks, state: state) }
+            )
+        ]
+    }
+
+    private func downloadTracks(in folderID: String?) -> [Track] {
+        let records: [DownloadRecord]
+        if let folderID {
+            records = DownloadService.shared.downloads(in: folderID)
+        } else {
+            records = DownloadService.shared.downloads
+        }
+
+        return Array(records.reversed().map(\.localTrack))
+    }
+
+    private func downloadTemplateKey(for folderID: String?) -> String {
+        folderID ?? allDownloadsTemplateKey
     }
 
     // MARK: Artwork
@@ -274,14 +455,15 @@ final class CarPlayManager: NSObject {
 
     private func batchFetch(tracks: [Track], playlists: [Playlist]) async {
         await withTaskGroup(of: Void.self) { g in
-            let urls: [URL] = (tracks.compactMap(\.artworkURL)
-                             + playlists.compactMap(\.artworkURL))
+            let urls = Set(tracks.compactMap(\.artworkURL) + playlists.compactMap(\.artworkURL))
             for url in urls {
                 guard cache.object(forKey: url as NSURL) == nil else { continue }
                 g.addTask { [weak self] in
                     guard let self else { return }
-                    guard let (data, _) = try? await URLSession.shared.data(from: url),
-                          let raw = UIImage(data: data) else { return }
+                    guard let raw = await ArtworkRepository.shared.image(
+                        for: url,
+                        maxPixelSize: ArtworkPixelSize.list
+                    ) else { return }
                     let sized = await self.squareImage(raw, side: 60)
                     await MainActor.run {
                         self.cache.setObject(sized, forKey: url as NSURL)

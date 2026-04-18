@@ -495,6 +495,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
         return response.items.compactMap { item in
             guard let videoID = item.id.videoID ?? item.id.raw else { return nil }
+            guard isLiveSearchResult(snippet: item.snippet) == false else { return nil }
             return Track(
                 id: videoID,
                 title: item.snippet.title,
@@ -723,6 +724,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func track(from item: VideoItem) -> Track? {
         guard let videoID = item.id.videoID ?? item.id.raw else { return nil }
+        guard isLiveSearchResult(snippet: item.snippet) == false else { return nil }
         let artist = cleanArtistName(item.snippet.channelTitle)
         let title = cleanTrackTitle(item.snippet.title, channelName: artist)
         return Track(
@@ -833,6 +835,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func track(fromInnerTubeVideoRenderer renderer: [String: Any]) -> Track? {
         guard let videoID = renderer["videoId"] as? String else { return nil }
+        guard isLiveSearchResult(renderer: renderer) == false else { return nil }
 
         let rawTitle = text(from: renderer["title"]) ?? "YouTube Track"
         let rawArtist =
@@ -1566,12 +1569,14 @@ private struct Snippet: Decodable {
     let channelTitle: String
     let thumbnails: ThumbnailCollection
     let categoryID: String?
+    let liveBroadcastContent: String?
 
     enum CodingKeys: String, CodingKey {
         case title
         case channelTitle
         case thumbnails
         case categoryID = "categoryId"
+        case liveBroadcastContent
     }
 }
 
@@ -1600,6 +1605,36 @@ private struct GoogleAPIError: Decodable {
 // MARK: - Music Content Helpers
 
 private extension YouTubeAPIService {
+    func isLiveSearchResult(snippet: Snippet) -> Bool {
+        switch snippet.liveBroadcastContent?.lowercased() {
+        case "live", "upcoming":
+            return true
+        default:
+            return false
+        }
+    }
+
+    func isLiveSearchResult(renderer: [String: Any]) -> Bool {
+        if renderer["upcomingEventData"] != nil {
+            return true
+        }
+
+        if let overlayText = text(from: renderer["thumbnailOverlays"])?.lowercased(),
+           overlayText.contains("live") || overlayText.contains("upcoming") {
+            return true
+        }
+
+        if let badges = renderer["badges"] as? [Any],
+           badges.contains(where: { badge in
+               let badgeText = text(from: badge)?.lowercased() ?? ""
+               return badgeText.contains("live") || badgeText.contains("upcoming")
+           }) {
+            return true
+        }
+
+        let durationText = text(from: renderer["lengthText"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return durationText == nil
+    }
 
     /// Returns true when the video is clearly non-music (kids songs, gaming, vlogs, etc.)
     func isNonMusicContent(title: String, channel: String) -> Bool {
