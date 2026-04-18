@@ -175,6 +175,21 @@ final class DownloadService: NSObject, ObservableObject {
         deleteDownload(record)
     }
 
+    func deleteAllDownloads() {
+        for task in downloadTasks.values {
+            task.cancel()
+        }
+
+        downloadTasks.removeAll()
+        progressObservations.removeAll()
+        activeDownloads.removeAll()
+
+        try? FileManager.default.removeItem(at: Self.downloadsDirectory)
+        downloads = []
+        createDirectoryIfNeeded()
+        saveMetadata()
+    }
+
     // MARK: Computed
 
     var totalDownloadedBytes: Int64 {

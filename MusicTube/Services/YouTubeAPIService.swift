@@ -12,8 +12,44 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
     }
 
+    private actor SearchCache {
+        private struct Entry {
+            let tracks: [Track]
+            let timestamp: Date
+        }
+
+        private var entries: [String: Entry] = [:]
+        private let maxAge: TimeInterval = 300
+        private let maxEntries = 80
+
+        func results(for key: String) -> [Track]? {
+            guard let entry = entries[key] else { return nil }
+            guard Date().timeIntervalSince(entry.timestamp) < maxAge else {
+                entries.removeValue(forKey: key)
+                return nil
+            }
+            return entry.tracks
+        }
+
+        func store(_ tracks: [Track], for key: String) {
+            entries[key] = Entry(tracks: tracks, timestamp: Date())
+
+            if entries.count > maxEntries {
+                let staleKeys = entries
+                    .sorted { $0.value.timestamp < $1.value.timestamp }
+                    .prefix(entries.count - maxEntries)
+                    .map(\.key)
+
+                for key in staleKeys {
+                    entries.removeValue(forKey: key)
+                }
+            }
+        }
+    }
+
     private let urlSession: URLSession
     private let apiKey: String?
+    private let searchCache = SearchCache()
     private let likedMusicPlaylistID = "liked-music"
     private let innerTubeSearchURL = URL(string: "https://www.youtube.com/youtubei/v1/search?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false")!
     private let innerTubeClientVersion = "2.20260114.08.00"
@@ -28,6 +64,17 @@ final class YouTubeAPIService: MusicCatalogProviding {
     }
 
     func search(query: String, accessToken: String) async throws -> [Track] {
+        let cacheKey = normalizedSearchCacheKey(for: query)
+        if let cachedResults = await searchCache.results(for: cacheKey) {
+            return cachedResults
+        }
+
+        let results = try await performSearch(query: query, accessToken: accessToken)
+        await searchCache.store(results, for: cacheKey)
+        return results
+    }
+
+    private func performSearch(query: String, accessToken: String) async throws -> [Track] {
         if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 25),
            innerTubeResults.isEmpty == false {
             return innerTubeResults
@@ -467,32 +514,42 @@ final class YouTubeAPIService: MusicCatalogProviding {
         }
 
         let excludedIDs = Set(seedTracks.compactMap(\.youtubeVideoID))
-        var recommendations: [Track] = []
         let querySuffixes = [
             "official audio",
             "official music video",
             "lyrics",
             "live session"
         ]
+        let recommendations = await withTaskGroup(of: [Track].self) { group in
+            for (index, artist) in seedArtists.enumerated() {
+                let suffix = querySuffixes[index % querySuffixes.count]
+                group.addTask { [self] in
+                    let query = "\(artist) \(suffix)"
+                    let results: [Track]
+                    if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 8),
+                       innerTubeResults.isEmpty == false {
+                        results = innerTubeResults
+                    } else {
+                        results = (try? await fetchSearchResults(
+                            query: query,
+                            accessToken: accessToken,
+                            maxResults: 8,
+                            musicOnly: true
+                        )) ?? []
+                    }
 
-        for artist in seedArtists {
-            let query = "\(artist) \(querySuffixes.randomElement() ?? "official audio")"
-            let results: [Track]
-            if let innerTubeResults = try? await fetchSearchResultsViaInnerTube(query: query, maxResults: 8),
-               innerTubeResults.isEmpty == false {
-                results = innerTubeResults
-            } else {
-                results = try await fetchSearchResults(
-                    query: query,
-                    accessToken: accessToken,
-                    maxResults: 8,
-                    musicOnly: true
-                )
+                    return results.filter { track in
+                        guard let videoID = track.youtubeVideoID else { return true }
+                        return excludedIDs.contains(videoID) == false
+                    }
+                }
             }
-            recommendations.append(contentsOf: results.filter { track in
-                guard let videoID = track.youtubeVideoID else { return true }
-                return excludedIDs.contains(videoID) == false
-            })
+
+            var collected: [Track] = []
+            for await tracks in group {
+                collected.append(contentsOf: tracks)
+            }
+            return collected
         }
 
         let deduped = deduplicatedTracks(recommendations.shuffled())
@@ -579,6 +636,12 @@ final class YouTubeAPIService: MusicCatalogProviding {
             return nil
         }
         return apiKey
+    }
+
+    private func normalizedSearchCacheKey(for query: String) -> String {
+        query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private func authorizedQueryItems(_ items: [URLQueryItem]) -> [URLQueryItem] {

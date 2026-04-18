@@ -41,12 +41,36 @@ final class LocalMusicProfileStore {
         var lastPlayedAt: Date
     }
 
+    private actor PersistenceController {
+        private let storageKey: String
+        private let defaults: UserDefaults
+
+        init(storageKey: String, defaults: UserDefaults) {
+            self.storageKey = storageKey
+            self.defaults = defaults
+        }
+
+        func persist(_ profiles: [String: StoredProfile]) {
+            guard let data = try? JSONEncoder().encode(profiles) else { return }
+            defaults.set(data, forKey: storageKey)
+        }
+
+        func clear() {
+            defaults.removeObject(forKey: storageKey)
+        }
+    }
+
     private let storageKey = "musictube.local.musicProfiles.v1"
     private let defaults: UserDefaults
+    private let persistence: PersistenceController
     private var profiles: [String: StoredProfile]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.persistence = PersistenceController(
+            storageKey: "musictube.local.musicProfiles.v1",
+            defaults: defaults
+        )
 
         if
             let data = defaults.data(forKey: storageKey),
@@ -156,11 +180,17 @@ final class LocalMusicProfileStore {
         return snapshot(from: profile)
     }
 
+    func clearAllData() {
+        profiles = [:]
+        Task(priority: .utility) { [persistence] in
+            await persistence.clear()
+        }
+    }
+
     private func snapshot(from profile: StoredProfile) -> LocalMusicProfileSnapshot {
         let likedTracks = deduplicatedTracks(profile.likedTracks)
         let recentTracks = deduplicatedTracks(
             profile.playRecords
-                .sorted { $0.lastPlayedAt > $1.lastPlayedAt }
                 .map(\.track)
         )
         let topTracks = deduplicatedTracks(
@@ -205,7 +235,9 @@ final class LocalMusicProfileStore {
     }
 
     private func persistProfiles() {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
-        defaults.set(data, forKey: storageKey)
+        let profiles = self.profiles
+        Task(priority: .utility) { [persistence] in
+            await persistence.persist(profiles)
+        }
     }
 }

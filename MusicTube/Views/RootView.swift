@@ -21,7 +21,7 @@ struct RootView: View {
             appState.dismissPlayer()
         }) {
             if let nowPlaying = appState.nowPlaying {
-                PlayerView(track: nowPlaying)
+                PlayerView(track: nowPlaying, playbackService: appState.playbackEngine)
                     .environmentObject(appState)
             }
         }
@@ -69,11 +69,7 @@ private struct MainTabView: View {
             if let nowPlaying = appState.nowPlaying {
                 MiniPlayerBar(
                     track: nowPlaying,
-                    isPlaying: appState.isPlaying,
-                    isPreparingPlayback: appState.isPreparingPlayback,
-                    playbackProgress: appState.playbackProgress,
-                    hasPreviousTrack: appState.hasPreviousTrack,
-                    hasNextTrack: appState.hasNextTrack,
+                    playbackService: appState.playbackEngine,
                     onTap: { appState.isPlayerPresented = true },
                     onPreviousTap: { appState.playPreviousTrack() },
                     onPlayPauseTap: { appState.togglePlayback() },
@@ -114,11 +110,7 @@ private struct MainTabView: View {
 
 private struct MiniPlayerBar: View {
     let track: Track
-    let isPlaying: Bool
-    let isPreparingPlayback: Bool
-    let playbackProgress: Double
-    let hasPreviousTrack: Bool
-    let hasNextTrack: Bool
+    @ObservedObject var playbackService: PlaybackService
     let onTap: () -> Void
     let onPreviousTap: () -> Void
     let onPlayPauseTap: () -> Void
@@ -169,11 +161,11 @@ private struct MiniPlayerBar: View {
                     Button(action: onPreviousTap) {
                         Image(systemName: "backward.fill")
                             .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(hasPreviousTrack ? Color.white : Color.white.opacity(0.25))
+                            .foregroundStyle(playbackService.hasPreviousTrack ? Color.white : Color.white.opacity(0.25))
                             .frame(width: 40, height: 40)
                     }
                     .buttonStyle(.plain)
-                    .disabled(!hasPreviousTrack)
+                    .disabled(!playbackService.hasPreviousTrack)
 
                     // Play / Pause — filled circle like mockup
                     Button(action: onPlayPauseTap) {
@@ -182,13 +174,13 @@ private struct MiniPlayerBar: View {
                                 .fill(Color(red: 1, green: 0.23, blue: 0.42))
                                 .frame(width: 36, height: 36)
 
-                            if isPreparingPlayback {
+                            if playbackService.isResolvingStream {
                                 ProgressView().tint(.white).scaleEffect(0.65)
                             } else {
-                                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                Image(systemName: playbackService.isPlaying ? "pause.fill" : "play.fill")
                                     .font(.system(size: 14, weight: .bold))
                                     .foregroundStyle(.white)
-                                    .offset(x: isPlaying ? 0 : 1)
+                                    .offset(x: playbackService.isPlaying ? 0 : 1)
                             }
                         }
                     }
@@ -198,11 +190,11 @@ private struct MiniPlayerBar: View {
                     Button(action: onNextTap) {
                         Image(systemName: "forward.fill")
                             .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(hasNextTrack ? Color.white : Color.white.opacity(0.25))
+                            .foregroundStyle(playbackService.hasNextTrack ? Color.white : Color.white.opacity(0.25))
                             .frame(width: 40, height: 40)
                     }
                     .buttonStyle(.plain)
-                    .disabled(!hasNextTrack)
+                    .disabled(!playbackService.hasNextTrack)
                 }
             }
             .padding(.horizontal, 16)
@@ -220,6 +212,11 @@ private struct MiniPlayerBar: View {
                         .frame(height: 0.5)
                 }
         )
+    }
+
+    private var playbackProgress: Double {
+        guard playbackService.duration.isFinite, playbackService.duration > 0 else { return 0 }
+        return min(max(playbackService.currentTime / playbackService.duration, 0), 1)
     }
 }
 

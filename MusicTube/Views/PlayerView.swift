@@ -5,6 +5,7 @@ struct PlayerView: View {
     @EnvironmentObject private var appState: AppState
 
     let track: Track
+    @ObservedObject var playbackService: PlaybackService
 
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
@@ -44,11 +45,11 @@ struct PlayerView: View {
         .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.7), value: dragOffset)
         .onAppear { syncScrubber() }
         .onChange(of: track.id) { _, _ in syncScrubber() }
-        .onChange(of: appState.playbackPosition) { _, _ in
+        .onChange(of: playbackService.currentTime) { _, _ in
             guard !isScrubbing else { return }
             syncScrubber()
         }
-        .onChange(of: appState.playbackDuration) { _, _ in
+        .onChange(of: playbackService.duration) { _, _ in
             guard !isScrubbing else { return }
             syncScrubber()
         }
@@ -174,8 +175,8 @@ struct PlayerView: View {
                 RoundedRectangle(cornerRadius: 30, style: .continuous)
                     .stroke(Color.white.opacity(0.08), lineWidth: 1)
             }
-            .scaleEffect(appState.isPlaying ? 1.0 : 0.95)
-            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: appState.isPlaying)
+            .scaleEffect(playbackService.isPlaying ? 1.0 : 0.95)
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: playbackService.isPlaying)
     }
 
     // MARK: Title
@@ -216,17 +217,17 @@ struct PlayerView: View {
         VStack(spacing: 12) {
             Slider(
                 value: $scrubPosition,
-                in: 0...max(appState.playbackDuration, 1),
+                in: 0...max(playbackService.duration, 1),
                 onEditingChanged: handleScrubbingChanged
             )
             .tint(.white)
-            .disabled(appState.playbackDuration <= 0)
+            .disabled(playbackService.duration <= 0)
 
             HStack {
                 Text(formatted(displayedPlaybackPosition))
                     .foregroundStyle(Color(white: 0.70))
                 Spacer()
-                if appState.isPreparingPlayback {
+                if playbackService.isResolvingStream {
                     HStack(spacing: 6) {
                         ProgressView().tint(.white).scaleEffect(0.7)
                         Text("Loading audio…")
@@ -235,7 +236,7 @@ struct PlayerView: View {
                     }
                 }
                 Spacer()
-                Text(formatted(appState.playbackDuration))
+                Text(formatted(playbackService.duration))
                     .foregroundStyle(Color(white: 0.70))
             }
             .font(.caption.monospacedDigit())
@@ -251,13 +252,13 @@ struct PlayerView: View {
             Button { appState.playPreviousTrack() } label: {
                 Image(systemName: "backward.fill")
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(appState.hasPreviousTrack ? .white : .white.opacity(0.3))
+                    .foregroundStyle(playbackService.hasPreviousTrack ? .white : .white.opacity(0.3))
                     .frame(width: 52, height: 52)
                     .background(Color.white.opacity(0.08))
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .disabled(!appState.hasPreviousTrack)
+            .disabled(!playbackService.hasPreviousTrack)
 
             // Play / Pause
             Button { appState.togglePlayback() } label: {
@@ -265,13 +266,13 @@ struct PlayerView: View {
                     Circle()
                         .fill(.white)
                         .frame(width: 84, height: 84)
-                    if appState.isPreparingPlayback {
+                    if playbackService.isResolvingStream {
                         ProgressView().tint(.black)
                     } else {
-                        Image(systemName: appState.isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: playbackService.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 32, weight: .bold))
                             .foregroundStyle(.black)
-                            .offset(x: appState.isPlaying ? 0 : 2)
+                            .offset(x: playbackService.isPlaying ? 0 : 2)
                     }
                 }
             }
@@ -280,13 +281,13 @@ struct PlayerView: View {
             Button { appState.playNextTrack() } label: {
                 Image(systemName: "forward.fill")
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(appState.hasNextTrack ? .white : .white.opacity(0.3))
+                    .foregroundStyle(playbackService.hasNextTrack ? .white : .white.opacity(0.3))
                     .frame(width: 52, height: 52)
                     .background(Color.white.opacity(0.08))
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .disabled(!appState.hasNextTrack)
+            .disabled(!playbackService.hasNextTrack)
         }
         .padding(.vertical, 22)
         .frame(maxWidth: .infinity)
@@ -303,8 +304,8 @@ struct PlayerView: View {
                 VStack(spacing: 4) {
                     Image(systemName: "shuffle")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(appState.shuffleMode ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.55))
-                    if appState.shuffleMode {
+                        .foregroundStyle(playbackService.shuffleMode ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.55))
+                    if playbackService.shuffleMode {
                         Circle()
                             .fill(Color(red: 1, green: 0.23, blue: 0.42))
                             .frame(width: 4, height: 4)
@@ -322,8 +323,8 @@ struct PlayerView: View {
                 VStack(spacing: 4) {
                     Image(systemName: repeatIcon)
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(appState.repeatMode == .off ? Color.white.opacity(0.55) : Color(red: 1, green: 0.23, blue: 0.42))
-                    if appState.repeatMode != .off {
+                        .foregroundStyle(playbackService.repeatMode == .off ? Color.white.opacity(0.55) : Color(red: 1, green: 0.23, blue: 0.42))
+                    if playbackService.repeatMode != .off {
                         Circle()
                             .fill(Color(red: 1, green: 0.23, blue: 0.42))
                             .frame(width: 4, height: 4)
@@ -361,7 +362,7 @@ struct PlayerView: View {
     }
 
     private var repeatIcon: String {
-        switch appState.repeatMode {
+        switch playbackService.repeatMode {
         case .off: return "repeat"
         case .all: return "repeat"
         case .one: return "repeat.1"
@@ -453,7 +454,7 @@ struct PlayerView: View {
     // MARK: Helpers
 
     private var displayedPlaybackPosition: TimeInterval {
-        // scrubPosition is always in sync with appState.playbackPosition when not scrubbing
+        // scrubPosition is always in sync with playbackService.currentTime when not scrubbing
         // (kept up to date by onChange → syncScrubber), so it's safe to use here always.
         scrubPosition
     }
@@ -477,7 +478,7 @@ struct PlayerView: View {
     }
 
     private func syncScrubber() {
-        let current = min(appState.playbackPosition, appState.playbackDuration)
+        let current = min(playbackService.currentTime, playbackService.duration)
         scrubPosition = max(0, current)
     }
 

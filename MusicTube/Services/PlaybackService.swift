@@ -914,21 +914,25 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return
         }
 
+        if let cachedImage = ImageCache.shared.image(for: artworkURL, maxPixelSize: ArtworkPixelSize.nowPlaying) {
+            artworkCache.setObject(cachedImage, forKey: artworkURL as NSURL)
+            setNowPlayingArtwork(cachedImage)
+            return
+        }
+
         artworkLoadTask = Task { [weak self, artworkURL, track] in
             guard let self else { return }
 
-            do {
-                let (data, _) = try await URLSession.shared.data(from: artworkURL)
-                guard Task.isCancelled == false else { return }
-                guard let image = UIImage(data: data) else { return }
+            guard let image = await ArtworkRepository.shared.image(
+                for: artworkURL,
+                maxPixelSize: ArtworkPixelSize.nowPlaying
+            ) else { return }
+            guard Task.isCancelled == false else { return }
 
-                self.artworkCache.setObject(image, forKey: artworkURL as NSURL)
+            self.artworkCache.setObject(image, forKey: artworkURL as NSURL)
 
-                guard self.nowPlaying?.id == track.id else { return }
-                self.setNowPlayingArtwork(image)
-            } catch {
-                return
-            }
+            guard self.nowPlaying?.id == track.id else { return }
+            self.setNowPlayingArtwork(image)
         }
     }
 

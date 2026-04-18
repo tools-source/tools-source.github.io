@@ -18,28 +18,21 @@ final class AppState: ObservableObject {
     @Published var searchResults: [Track] = []
     @Published var nowPlaying: Track?
     @Published var isPlaying: Bool = false
-    @Published private(set) var playbackPosition: TimeInterval = 0
-    @Published private(set) var playbackDuration: TimeInterval = 0
-    @Published private(set) var playbackProgress: Double = 0
     @Published var searchQuery: String = ""
     @Published private(set) var recentSearches: [String] = []
     @Published private(set) var isSearching: Bool = false
     @Published var isLoading: Bool = false
     @Published var isLoadingPlaylists: Bool = false
     @Published var isPlayerPresented: Bool = false
-    @Published var isPreparingPlayback: Bool = false
     @Published var errorMessage: String?
     @Published private(set) var homeStatusMessage: String?
     @Published private(set) var libraryStatusMessage: String?
     @Published private(set) var likedTrackIDs: Set<String> = []
-    @Published private(set) var hasNextTrack: Bool = false
-    @Published private(set) var hasPreviousTrack: Bool = false
     @Published private(set) var hasLoadedHome = false
     @Published private(set) var hasLoadedLibrary = false
-    @Published var shuffleMode: Bool = false
-    @Published var repeatMode: PlaybackService.RepeatMode = .off
     @Published private(set) var sleepTimerEndDate: Date?
     @Published private(set) var isDownloadingNowPlaying: Bool = false
+    @Published private(set) var isDeletingAccountData: Bool = false
 
     private var session: YouTubeSession?
     private var sleepTimerTask: Task<Void, Never>?
@@ -73,13 +66,6 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 guard self.nowPlaying != track else { return }
                 self.nowPlaying = track
-
-                if track == nil {
-                    self.playbackPosition = 0
-                    self.playbackDuration = 0
-                    self.playbackProgress = 0
-                }
-
                 AppContainer.shared.carPlayManager?.refresh(using: self)
             }
             .store(in: &cancellables)
@@ -94,63 +80,12 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
-        playbackService.$isResolvingStream
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.isPreparingPlayback, on: self)
-            .store(in: &cancellables)
-
         playbackService.$playbackErrorMessage
             .receive(on: DispatchQueue.main)
             .sink { [weak self] message in
                 guard let message else { return }
                 self?.errorMessage = message
             }
-            .store(in: &cancellables)
-
-        playbackService.$hasNextTrack
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.hasNextTrack, on: self)
-            .store(in: &cancellables)
-
-        playbackService.$hasPreviousTrack
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.hasPreviousTrack, on: self)
-            .store(in: &cancellables)
-
-        playbackService.$currentTime
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.playbackPosition, on: self)
-            .store(in: &cancellables)
-
-        playbackService.$duration
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.playbackDuration, on: self)
-            .store(in: &cancellables)
-
-        Publishers.CombineLatest(playbackService.$currentTime, playbackService.$duration)
-            .receive(on: DispatchQueue.main)
-            .map { currentTime, duration in
-                guard duration.isFinite, duration > 0 else { return 0 }
-                return min(max(currentTime / duration, 0), 1)
-            }
-            .assign(to: \.playbackProgress, on: self)
-            .store(in: &cancellables)
-
-        playbackService.$shuffleMode
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.shuffleMode, on: self)
-            .store(in: &cancellables)
-
-        playbackService.$repeatMode
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.repeatMode, on: self)
             .store(in: &cancellables)
 
         // Make appState available to CarPlay immediately — before the SwiftUI
@@ -177,6 +112,10 @@ final class AppState: ObservableObject {
             catalogService: YouTubeAPIService(),
             playbackService: PlaybackService()
         )
+    }
+
+    var playbackEngine: PlaybackService {
+        playbackService
     }
 
     var homeMixAlbums: [Playlist] {
@@ -218,34 +157,19 @@ final class AppState: ObservableObject {
 
     func signOut() async {
         await authService.signOut()
-        playbackService.stop()
-        session = nil
-        user = nil
-        featuredTracks = []
-        recentTracks = []
-        playlists = []
-        suggestedMixes = []
-        searchResults = []
-        nowPlaying = nil
-        isPlaying = false
-        playbackPosition = 0
-        playbackDuration = 0
-        playbackProgress = 0
-        isPlayerPresented = false
-        isSearching = false
-        isPreparingPlayback = false
-        playlistCache = [:]
-        activeSearchRequestID = nil
-        errorMessage = nil
-        homeStatusMessage = nil
-        libraryStatusMessage = nil
-        likedTrackIDs = []
-        recentSearches = []
-        hasLoadedHome = false
-        hasLoadedLibrary = false
-        isRefreshingDashboard = false
-        authState = .signedOut
-        AppContainer.shared.carPlayManager?.refresh(using: self)
+        resetSignedInState()
+    }
+
+    func deleteCurrentAccountData() async {
+        guard isDeletingAccountData == false else { return }
+
+        isDeletingAccountData = true
+        defer { isDeletingAccountData = false }
+
+        await authService.signOut()
+        downloadService.deleteAllDownloads()
+        localMusicProfileStore.clearAllData()
+        resetSignedInState()
     }
 
     func refreshDashboard() async {
@@ -374,20 +298,28 @@ final class AppState: ObservableObject {
         let suggestionQueries = Array(recentSearches.prefix(6))
         guard suggestionQueries.isEmpty == false else { return [] }
 
-        var resultBuckets: [[Track]] = []
+        let resultBuckets = await withTaskGroup(of: [Track]?.self) { group in
+            for query in suggestionQueries {
+                guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { continue }
 
-        for query in suggestionQueries {
-            guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { continue }
-
-            do {
-                let results = try await catalogService.search(query: query, accessToken: accessToken)
-                let bucket = Array(results.prefix(12))
-                if bucket.isEmpty == false {
-                    resultBuckets.append(bucket)
+                group.addTask {
+                    do {
+                        let results = try await self.catalogService.search(query: query, accessToken: accessToken)
+                        let bucket = Array(results.prefix(12))
+                        return bucket.isEmpty ? nil : bucket
+                    } catch {
+                        return nil
+                    }
                 }
-            } catch {
-                continue
             }
+
+            var buckets: [[Track]] = []
+            for await bucket in group {
+                if let bucket {
+                    buckets.append(bucket)
+                }
+            }
+            return buckets
         }
 
         guard resultBuckets.isEmpty == false else { return [] }
@@ -610,6 +542,38 @@ final class AppState: ObservableObject {
         } else {
             authState = .signedOut
         }
+    }
+
+    private func resetSignedInState() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        playbackService.stop()
+        session = nil
+        user = nil
+        featuredTracks = []
+        recentTracks = []
+        playlists = []
+        suggestedMixes = []
+        searchResults = []
+        nowPlaying = nil
+        isPlaying = false
+        searchQuery = ""
+        isPlayerPresented = false
+        isSearching = false
+        isDownloadingNowPlaying = false
+        playlistCache = [:]
+        activeSearchRequestID = nil
+        errorMessage = nil
+        homeStatusMessage = nil
+        libraryStatusMessage = nil
+        likedTrackIDs = []
+        recentSearches = []
+        hasLoadedHome = false
+        hasLoadedLibrary = false
+        isRefreshingDashboard = false
+        sleepTimerEndDate = nil
+        authState = .signedOut
+        AppContainer.shared.carPlayManager?.refresh(using: self)
     }
 
     private func buildHomeFromLoadedLibrary() async -> Bool {

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var isShowingDeleteDataConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -47,6 +48,19 @@ struct LibraryView: View {
                 }
             }
             .background(libraryBackground.ignoresSafeArea())
+            .confirmationDialog(
+                "Delete MusicTube data from this iPhone?",
+                isPresented: $isShowingDeleteDataConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete MusicTube Data", role: .destructive) {
+                    Task {
+                        await appState.deleteCurrentAccountData()
+                    }
+                }
+            } message: {
+                Text("This removes the saved MusicTube session, downloads, likes, recent plays, and recent searches stored on this device. It does not delete your Google or YouTube account.")
+            }
         }
     }
 
@@ -96,12 +110,34 @@ struct LibraryView: View {
                 Divider()
                     .overlay(Color.white.opacity(0.08))
 
+                Text("MusicTube does not create a separate app account. Sign out removes the saved session. Delete MusicTube Data removes the app's local session, downloads, and on-device activity from this iPhone.")
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Button("Sign out", role: .destructive) {
                     Task {
                         await appState.signOut()
                     }
                 }
                 .font(.headline)
+                .disabled(appState.isDeletingAccountData)
+
+                Button("Delete MusicTube Data", role: .destructive) {
+                    isShowingDeleteDataConfirmation = true
+                }
+                .font(.headline)
+                .disabled(appState.isDeletingAccountData)
+
+                if appState.isDeletingAccountData {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .tint(.white)
+                        Text("Deleting local MusicTube data...")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.white.opacity(0.72))
+                    }
+                }
             }
         }
     }
