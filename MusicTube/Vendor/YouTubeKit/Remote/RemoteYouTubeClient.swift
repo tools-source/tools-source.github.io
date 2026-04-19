@@ -13,7 +13,7 @@ class RemoteYouTubeClient {
     let serverURL: URL
     
     init(serverURL: URL) {
-        self.serverURL = serverURL
+        self.serverURL = Self.normalizedWebSocketURL(from: serverURL)
     }
     
     func extractStreams(forVideoID videoID: String) async throws -> [RemoteStream] {
@@ -136,6 +136,23 @@ class RemoteYouTubeClient {
                 }
             }
         }
+    }
+
+    private static func normalizedWebSocketURL(from url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+
+        switch components.scheme?.lowercased() {
+        case "http":
+            components.scheme = "ws"
+        case "https":
+            components.scheme = "wss"
+        default:
+            break
+        }
+
+        return components.url ?? url
     }
     
 }

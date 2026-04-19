@@ -32,6 +32,12 @@ struct HomeView: View {
                     filterChips
                         .padding(.bottom, 24)
 
+                    if let homeStatusMessage = appState.homeStatusMessage {
+                        statusCard(homeStatusMessage)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 24)
+                    }
+
                     if selectedFilter == .all || selectedFilter == .playlists {
                         mixesSection
                             .padding(.bottom, 28)
@@ -333,6 +339,26 @@ struct HomeView: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.white.opacity(0.05))
             )
+    }
+
+    private func statusCard(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                .padding(.top, 2)
+
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(Color.white.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
     }
 
     // MARK: Skeletons
@@ -669,25 +695,6 @@ struct TrackListSheet: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-    }
-}
-
-// MARK: - Track+formattedDuration
-
-private extension Track {
-    var formattedDuration: String? {
-        guard let duration, duration.isFinite, duration > 0 else { return nil }
-
-        let totalSeconds = Int(duration.rounded())
-        let hours = totalSeconds / 3_600
-        let minutes = (totalSeconds % 3_600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-        }
-
-        return String(format: "%d:%02d", minutes, seconds)
     }
 }
 

@@ -1162,7 +1162,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             throw PlaybackError.missingSource
         }
 
-        let youtube = YouTube(videoID: videoID, methods: [.local, .remote])
+        let youtube = YouTube(videoID: videoID, methods: [.remote, .local])
         let streams: [Stream]
         do {
             streams = try await youtube.streams

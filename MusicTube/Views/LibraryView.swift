@@ -222,7 +222,9 @@ struct LibraryView: View {
                 VStack(spacing: 12) {
                     ForEach(appState.customPlaylists) { playlist in
                         NavigationLink(value: playlist) {
-                            PlaylistRow(playlist: playlist)
+                            PlaylistRow(playlist: playlist) {
+                                appState.downloadPlaylist(playlist)
+                            }
                         }
                         .buttonStyle(.plain)
                     }
@@ -261,7 +263,9 @@ struct LibraryView: View {
                 VStack(spacing: 12) {
                     ForEach(remoteCollections) { playlist in
                         NavigationLink(value: playlist) {
-                            PlaylistRow(playlist: playlist)
+                            PlaylistRow(playlist: playlist) {
+                                appState.downloadPlaylist(playlist)
+                            }
                         }
                         .buttonStyle(.plain)
                     }
@@ -308,6 +312,7 @@ struct LibraryView: View {
 
 private struct PlaylistRow: View {
     let playlist: Playlist
+    var onDownload: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -326,6 +331,18 @@ private struct PlaylistRow: View {
             }
 
             Spacer(minLength: 10)
+
+            if let onDownload {
+                Button(action: onDownload) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 38, height: 38)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
 
             Image(systemName: "chevron.right")
                 .font(.footnote.weight(.bold))
@@ -397,11 +414,18 @@ private struct SavedCollectionRow: View {
 }
 
 struct PlaylistDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: AppState
     let playlist: Playlist
 
     @State private var tracks: [Track] = []
     @State private var isLoading = true
+    @State private var isEditSheetPresented = false
+    @State private var editedPlaylistName = ""
+
+    private var currentPlaylist: Playlist {
+        appState.playlists.first(where: { $0.id == playlist.id }) ?? playlist
+    }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -409,15 +433,19 @@ struct PlaylistDetailView: View {
                 if isLoading {
                     loadingCard("Loading playlist tracks...")
                 } else if tracks.isEmpty {
-                    loadingCard("This collection does not have playable items yet.")
+                    emptyCard("This playlist is empty for now.")
                 } else {
                     ForEach(tracks) { track in
-                        TrackRowView(
-                            track: track,
-                            showsNowPlayingIndicator: true,
-                            showsDownloadButton: true
-                        ) {
-                            appState.play(track: track, queue: tracks)
+                        if playlist.kind == .custom {
+                            editableTrackRow(track)
+                        } else {
+                            TrackRowView(
+                                track: track,
+                                showsNowPlayingIndicator: true,
+                                showsDownloadButton: true
+                            ) {
+                                appState.play(track: track, queue: tracks)
+                            }
                         }
                     }
                 }
@@ -427,18 +455,85 @@ struct PlaylistDetailView: View {
             .padding(.bottom, appState.nowPlaying == nil ? 108 : 174)
         }
         .background(detailBackground)
-        .navigationTitle(playlist.title)
+        .navigationTitle(currentPlaylist.title)
         .toolbar {
-            if playlist.kind == .custom {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        appState.presentPlaylistCreator()
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button {
+                    appState.downloadPlaylist(currentPlaylist)
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .foregroundStyle(.white)
+                }
+
+                if playlist.kind == .custom {
+                    Menu {
+                        Button {
+                            editedPlaylistName = currentPlaylist.title
+                            isEditSheetPresented = true
+                        } label: {
+                            Label("Edit Playlist", systemImage: "pencil")
+                        }
+
+                        Button {
+                            appState.presentPlaylistSongAdder(for: currentPlaylist)
+                        } label: {
+                            Label("Add Songs", systemImage: "plus.circle")
+                        }
+
+                        Button(role: .destructive) {
+                            appState.deleteCustomPlaylist(currentPlaylist)
+                            dismiss()
+                        } label: {
+                            Label("Delete Playlist", systemImage: "trash")
+                        }
                     } label: {
-                        Image(systemName: "plus.circle")
+                        Image(systemName: "ellipsis.circle")
                             .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
                     }
                 }
             }
+        }
+        .sheet(isPresented: $isEditSheetPresented) {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Playlist name")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    TextField("Playlist name", text: $editedPlaylistName)
+                        .textInputAutocapitalization(.words)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                        .foregroundStyle(.white)
+
+                    Spacer()
+                }
+                .padding(20)
+                .background(Color.black.ignoresSafeArea())
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            isEditSheetPresented = false
+                        }
+                        .foregroundStyle(.white.opacity(0.8))
+                    }
+
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            if appState.renameCustomPlaylist(currentPlaylist, to: editedPlaylistName) {
+                                isEditSheetPresented = false
+                            }
+                        }
+                        .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                        .disabled(editedPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .presentationDetents([.height(220)])
         }
         .task {
             guard tracks.isEmpty else { return }
@@ -475,6 +570,109 @@ struct PlaylistDetailView: View {
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color.white.opacity(0.07))
+        )
+    }
+
+    private func emptyCard(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(Color.white.opacity(0.72))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white.opacity(0.07))
+            )
+    }
+
+    private func editableTrackRow(_ track: Track) -> some View {
+        HStack(spacing: 14) {
+            Button {
+                appState.play(track: track, queue: tracks)
+            } label: {
+                HStack(spacing: 14) {
+                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
+                        .frame(width: 56, height: 56)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(track.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+
+                        HStack(spacing: 4) {
+                            if appState.nowPlaying?.playbackKey == track.playbackKey, appState.isPlaying {
+                                Image(systemName: "speaker.wave.2.fill")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
+                            }
+
+                            Text(track.artist)
+                                .font(.footnote)
+                                .foregroundStyle(Color.white.opacity(0.58))
+                                .lineLimit(1)
+
+                            if let duration = track.formattedDuration {
+                                Text("· \(duration)")
+                                    .font(.footnote)
+                                    .foregroundStyle(Color.white.opacity(0.48))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 8)
+
+            DownloadButton(track: track, size: 36)
+
+            Button {
+                appState.removeTrack(track, from: playlist)
+                tracks.removeAll { $0.playbackKey == track.playbackKey }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color.red.opacity(0.92))
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.red.opacity(0.14)))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                if appState.nowPlaying?.playbackKey == track.playbackKey, appState.isPlaying {
+                    appState.togglePlayback()
+                } else {
+                    appState.play(track: track, queue: tracks)
+                }
+            } label: {
+                Image(systemName: appState.nowPlaying?.playbackKey == track.playbackKey && appState.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle()
+                            .fill(Color(red: 1, green: 0.24, blue: 0.43))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.white.opacity(0.03))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                }
         )
     }
 }
@@ -555,17 +753,31 @@ struct CollectionDetailView: View {
 
             Spacer()
 
-            Button {
-                appState.toggleCollectionSaved(collection)
-            } label: {
-                Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
-                    .font(.headline)
-                    .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.65))
-                    .frame(width: 40, height: 40)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(Circle())
+            HStack(spacing: 10) {
+                Button {
+                    appState.downloadCollection(collection)
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(width: 40, height: 40)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.toggleCollectionSaved(collection)
+                } label: {
+                    Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
+                        .font(.headline)
+                        .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.65))
+                        .frame(width: 40, height: 40)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(18)
         .background(

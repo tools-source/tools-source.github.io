@@ -4,8 +4,13 @@ struct DownloadsView: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var downloadService = DownloadService.shared
     @State private var selectedFolderID: String?
+    @State private var selectedSourceID: String?
     @State private var isShowingCreateFolderPrompt = false
+    @State private var isShowingRenameFolderPrompt = false
+    @State private var folderPendingDeletion: DownloadFolder?
+    @State private var folderBeingRenamed: DownloadFolder?
     @State private var newFolderName = ""
+    @State private var renamedFolderName = ""
 
     var body: some View {
         NavigationStack {
@@ -13,6 +18,10 @@ struct DownloadsView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     if downloadService.folders.isEmpty == false || downloadService.downloads.isEmpty == false {
                         foldersSection
+                    }
+
+                    if downloadService.downloadSources.isEmpty == false {
+                        sourcesSection
                     }
 
                     if downloadService.activeDownloads.isEmpty == false {
@@ -34,6 +43,12 @@ struct DownloadsView: View {
             .navigationTitle("Downloads")
             .navigationBarTitleDisplayMode(.large)
             .background(Color.black.ignoresSafeArea())
+            .onReceive(downloadService.$folders) { _ in
+                sanitizeSelections()
+            }
+            .onReceive(downloadService.$downloads) { _ in
+                sanitizeSelections()
+            }
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     if downloadService.downloads.isEmpty == false {
@@ -65,19 +80,95 @@ struct DownloadsView: View {
             } message: {
                 Text("Organize downloaded songs into folders.")
             }
+            .alert("Rename Folder", isPresented: $isShowingRenameFolderPrompt) {
+                TextField("Folder name", text: $renamedFolderName)
+                Button("Save") {
+                    if let folderBeingRenamed {
+                        downloadService.renameFolder(folderBeingRenamed, to: renamedFolderName)
+                    }
+                    folderBeingRenamed = nil
+                    renamedFolderName = ""
+                }
+                Button("Cancel", role: .cancel) {
+                    folderBeingRenamed = nil
+                    renamedFolderName = ""
+                }
+            } message: {
+                Text("Give this folder a new name.")
+            }
+            .alert(
+                "Delete Folder?",
+                isPresented: Binding(
+                    get: { folderPendingDeletion != nil },
+                    set: { isPresented in
+                        if isPresented == false {
+                            folderPendingDeletion = nil
+                        }
+                    }
+                ),
+                presenting: folderPendingDeletion
+            ) { folder in
+                Button("Delete", role: .destructive) {
+                    if selectedFolderID == folder.id {
+                        selectedFolderID = nil
+                    }
+                    downloadService.deleteFolder(folder)
+                    folderPendingDeletion = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    folderPendingDeletion = nil
+                }
+            } message: { folder in
+                Text("Songs in \"\(folder.name)\" will stay downloaded and move back to All.")
+            }
         }
     }
 
     private var filteredDownloads: [DownloadRecord] {
+        var records: [DownloadRecord]
         if let selectedFolderID {
-            return Array(downloadService.downloads(in: selectedFolderID).reversed())
+            records = downloadService.downloads(in: selectedFolderID)
+        } else {
+            records = downloadService.downloads
         }
-        return Array(downloadService.downloads.reversed())
+
+        if let selectedSourceID {
+            records = records.filter { $0.source?.id == selectedSourceID }
+        }
+
+        return Array(records.reversed())
     }
 
     private var foldersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Folders")
+            HStack {
+                sectionTitle("Folders")
+
+                Spacer()
+
+                if let selectedFolder {
+                    Menu {
+                        Button {
+                            folderBeingRenamed = selectedFolder
+                            renamedFolderName = selectedFolder.name
+                            isShowingRenameFolderPrompt = true
+                        } label: {
+                            Label("Rename Folder", systemImage: "pencil")
+                        }
+
+                        Button(role: .destructive) {
+                            folderPendingDeletion = selectedFolder
+                        } label: {
+                            Label("Delete Folder", systemImage: "trash")
+                        }
+                    } label: {
+                        Label("Edit", systemImage: "ellipsis.circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.white.opacity(0.58))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     folderChip(title: "All", isSelected: selectedFolderID == nil) {
@@ -90,6 +181,28 @@ struct DownloadsView: View {
                             isSelected: selectedFolderID == folder.id
                         ) {
                             selectedFolderID = folder.id
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var sourcesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("Collections")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    folderChip(title: "All Collections", isSelected: selectedSourceID == nil) {
+                        selectedSourceID = nil
+                    }
+
+                    ForEach(downloadService.downloadSources) { source in
+                        folderChip(
+                            title: source.title,
+                            isSelected: selectedSourceID == source.id
+                        ) {
+                            selectedSourceID = source.id
                         }
                     }
                 }
@@ -129,6 +242,9 @@ struct DownloadsView: View {
     private var downloadedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionTitle(selectedFolderID == nil ? "Downloaded" : "Folder")
+            if let selectedSource {
+                downloadSourceCard(selectedSource)
+            }
             VStack(spacing: 0) {
                 ForEach(Array(filteredDownloads.enumerated()), id: \.element.id) { index, record in
                     CompactDownloadRow(record: record) {
@@ -148,6 +264,16 @@ struct DownloadsView: View {
             }
             .background(rowBackground)
         }
+    }
+
+    private var selectedSource: DownloadSource? {
+        guard let selectedSourceID else { return nil }
+        return downloadService.downloadSources.first(where: { $0.id == selectedSourceID })
+    }
+
+    private var selectedFolder: DownloadFolder? {
+        guard let selectedFolderID else { return nil }
+        return downloadService.folders.first(where: { $0.id == selectedFolderID })
     }
 
     private var emptyState: some View {
@@ -172,13 +298,13 @@ struct DownloadsView: View {
 
     private var emptyFolderState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "folder")
+            Image(systemName: selectedSourceID == nil ? "folder" : "square.stack")
                 .font(.system(size: 36, weight: .light))
                 .foregroundStyle(Color.white.opacity(0.3))
-            Text("This folder is empty.")
+            Text(selectedSourceID == nil ? "This folder is empty." : "No downloads in this collection yet.")
                 .font(.headline)
                 .foregroundStyle(.white)
-            Text("Move downloads here from the menu on any track.")
+            Text(selectedSourceID == nil ? "Move downloads here from the menu on any track." : "Download a playlist or artist to group its songs here.")
                 .font(.subheadline)
                 .foregroundStyle(Color.white.opacity(0.5))
         }
@@ -197,6 +323,42 @@ struct DownloadsView: View {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(Color(white: 0.1, opacity: 1))
     }
+
+    private func sanitizeSelections() {
+        if let selectedFolderID,
+           downloadService.folders.contains(where: { $0.id == selectedFolderID }) == false {
+            self.selectedFolderID = nil
+        }
+
+        if let selectedSourceID,
+           downloadService.downloadSources.contains(where: { $0.id == selectedSourceID }) == false {
+            self.selectedSourceID = nil
+        }
+    }
+
+    private func downloadSourceCard(_ source: DownloadSource) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: source.kind == .artist ? "music.mic" : "square.stack.fill")
+                .font(.title3)
+                .foregroundStyle(.white.opacity(0.8))
+                .frame(width: 42, height: 42)
+                .background(Circle().fill(Color.white.opacity(0.08)))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(source.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text("\(source.displayKind) · \(downloadService.downloadCount(for: source)) tracks")
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.55))
+            }
+
+            Spacer()
+        }
+        .padding(14)
+        .background(rowBackground)
+    }
 }
 
 private struct ActiveRow: View {
@@ -213,6 +375,13 @@ private struct ActiveRow: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
+
+                if let source = active.source {
+                    Text(source.title)
+                        .font(.caption)
+                        .foregroundStyle(Color.white.opacity(0.45))
+                        .lineLimit(1)
+                }
 
                 DownloadProgressBar(progress: active.progress)
                     .frame(height: 3)
@@ -271,6 +440,13 @@ private struct CompactDownloadRow: View {
                             .font(.caption)
                             .foregroundStyle(Color.white.opacity(0.5))
                             .lineLimit(1)
+
+                        if let source = record.source {
+                            Text("· \(source.title)")
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.32))
+                                .lineLimit(1)
+                        }
 
                         if let folder = downloadService.folder(for: record) {
                             Text("· \(folder.name)")

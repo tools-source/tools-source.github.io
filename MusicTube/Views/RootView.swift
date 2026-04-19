@@ -116,6 +116,10 @@ private struct PlaylistPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: AppState
     @State private var playlistName = ""
+    @State private var addSongsQuery = ""
+    @State private var addSongResults: [Track] = []
+    @State private var addSongsTask: Task<Void, Never>?
+    @State private var isSearchingSongs = false
 
     var body: some View {
         NavigationStack {
@@ -131,7 +135,9 @@ private struct PlaylistPickerSheet: View {
                             .foregroundStyle(Color.white.opacity(0.64))
                     }
 
-                    if appState.playlistPickerTrack != nil, appState.customPlaylists.isEmpty == false {
+                    if isTargetingExistingPlaylist {
+                        addSongsSection
+                    } else if appState.playlistPickerTrack != nil, appState.customPlaylists.isEmpty == false {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Your playlists")
                                 .font(.headline)
@@ -175,42 +181,44 @@ private struct PlaylistPickerSheet: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(appState.playlistPickerTrack == nil ? "New playlist" : "Create new playlist")
-                            .font(.headline)
-                            .foregroundStyle(.white)
+                    if isTargetingExistingPlaylist == false {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(appState.playlistPickerTrack == nil ? "New playlist" : "Create new playlist")
+                                .font(.headline)
+                                .foregroundStyle(.white)
 
-                        TextField("Playlist name", text: $playlistName)
-                            .textInputAutocapitalization(.words)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 14)
-                            .background(
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .fill(Color.white.opacity(0.08))
-                            )
-                            .foregroundStyle(.white)
+                            TextField("Playlist name", text: $playlistName)
+                                .textInputAutocapitalization(.words)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .fill(Color.white.opacity(0.08))
+                                )
+                                .foregroundStyle(.white)
 
-                        Button {
-                            if appState.createCustomPlaylist(named: playlistName) {
-                                dismiss()
+                            Button {
+                                if appState.createCustomPlaylist(named: playlistName) {
+                                    dismiss()
+                                }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "music.note.list")
+                                    Text(appState.playlistPickerTrack == nil ? "Create Playlist" : "Create & Add Song")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(Color(red: 1, green: 0.23, blue: 0.42))
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
-                        } label: {
-                            HStack {
-                                Image(systemName: "music.note.list")
-                                Text(appState.playlistPickerTrack == nil ? "Create Playlist" : "Create & Add Song")
-                                    .fontWeight(.semibold)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Color(red: 1, green: 0.23, blue: 0.42))
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .buttonStyle(.plain)
+                            .disabled(playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                        if let track = appState.playlistPickerTrack {
-                            trackPreview(track)
+                            if let track = appState.playlistPickerTrack {
+                                trackPreview(track)
+                            }
                         }
                     }
                 }
@@ -227,15 +235,132 @@ private struct PlaylistPickerSheet: View {
                     .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
                 }
             }
+            .onDisappear {
+                addSongsTask?.cancel()
+            }
         }
     }
 
     private var helperText: String {
+        if let playlist = appState.playlistPickerTargetPlaylist {
+            return "Search for songs and add them directly to \(playlist.title)."
+        }
+
         if let track = appState.playlistPickerTrack {
             return "Add \(track.title) to an existing playlist or create a new one."
         }
 
         return "Create a playlist now and start filling it from search, home, downloads, or the player."
+    }
+
+    private var isTargetingExistingPlaylist: Bool {
+        appState.playlistPickerTargetPlaylist != nil
+    }
+
+    private var addSongsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Find songs")
+                .font(.headline)
+                .foregroundStyle(.white)
+
+            TextField("Search songs to add", text: $addSongsQuery)
+                .textInputAutocapitalization(.words)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+                .foregroundStyle(.white)
+                .onChange(of: addSongsQuery) { _, newValue in
+                    scheduleSongSearch(for: newValue)
+                }
+
+            if isSearchingSongs {
+                Text("Searching songs...")
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.58))
+            } else if addSongsQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Type a song name, artist, or album to add tracks to this playlist.")
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.58))
+            } else if addSongResults.isEmpty {
+                Text("No songs matched that search.")
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.58))
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(addSongResults.prefix(12)) { track in
+                        addSongRow(track)
+                    }
+                }
+            }
+        }
+    }
+
+    private func addSongRow(_ track: Track) -> some View {
+        HStack(spacing: 12) {
+            AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
+                .frame(width: 48, height: 48)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Text(track.artist)
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if let playlist = appState.playlistPickerTargetPlaylist, appState.isTrack(track, in: playlist) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.green.opacity(0.92))
+            } else {
+                Button {
+                    guard let playlist = appState.playlistPickerTargetPlaylist else { return }
+                    appState.addTrack(track, to: playlist)
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+    }
+
+    private func scheduleSongSearch(for query: String) {
+        addSongsTask?.cancel()
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            isSearchingSongs = false
+            addSongResults = []
+            return
+        }
+
+        isSearchingSongs = true
+        addSongsTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard Task.isCancelled == false else { return }
+            let results = await appState.searchTracksForPlaylist(trimmed)
+            guard Task.isCancelled == false else { return }
+            await MainActor.run {
+                addSongResults = results
+                isSearchingSongs = false
+            }
+        }
     }
 
     private func trackPreview(_ track: Track) -> some View {

@@ -266,6 +266,41 @@ final class LocalMusicProfileStore {
     }
 
     @discardableResult
+    func renameCustomPlaylist(
+        playlistID: String,
+        to name: String,
+        description: String? = nil,
+        profileID: String
+    ) -> LocalMusicProfileSnapshot {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else {
+            return snapshot(for: profileID)
+        }
+
+        var profile = profiles[profileID] ?? StoredProfile()
+
+        if let playlistIndex = profile.customPlaylists.firstIndex(where: { $0.id == playlistID }) {
+            profile.customPlaylists[playlistIndex].title = trimmedName
+            if let description {
+                profile.customPlaylists[playlistIndex].description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    @discardableResult
+    func deleteCustomPlaylist(_ playlistID: String, profileID: String) -> LocalMusicProfileSnapshot {
+        var profile = profiles[profileID] ?? StoredProfile()
+        profile.customPlaylists.removeAll { $0.id == playlistID }
+        profiles[profileID] = profile
+        persistProfiles()
+        return snapshot(from: profile)
+    }
+
+    @discardableResult
     func recordSearch(_ query: String, for profileID: String) -> LocalMusicProfileSnapshot {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedQuery.isEmpty == false else {

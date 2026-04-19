@@ -357,17 +357,31 @@ private struct MusicCollectionRow: View {
 
             Spacer()
 
-            Button {
-                appState.toggleCollectionSaved(collection)
-            } label: {
-                Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
-                    .font(.headline)
-                    .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.68))
-                    .frame(width: 38, height: 38)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(Circle())
+            HStack(spacing: 10) {
+                Button {
+                    appState.downloadCollection(collection)
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.78))
+                        .frame(width: 38, height: 38)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.toggleCollectionSaved(collection)
+                } label: {
+                    Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
+                        .font(.headline)
+                        .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.68))
+                        .frame(width: 38, height: 38)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)

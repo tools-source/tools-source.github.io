@@ -533,7 +533,7 @@ struct PlayerView: View {
     }
 
     private func formatted(_ interval: TimeInterval) -> String {
-        Self.timeFormatter.string(from: interval) ?? "0:00"
+        Track.formatDuration(interval) ?? "0:00"
     }
 
     private func glassCard(cornerRadius: CGFloat) -> some View {
@@ -549,12 +549,6 @@ struct PlayerView: View {
             }
     }
 
-    private static let timeFormatter: DateComponentsFormatter = {
-        let f = DateComponentsFormatter()
-        f.allowedUnits = [.minute, .second]
-        f.zeroFormattingBehavior = [.pad]
-        return f
-    }()
 }
 
 // MARK: - CircularProgress

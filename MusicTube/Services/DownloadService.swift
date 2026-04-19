@@ -1,6 +1,20 @@
 import AVFoundation
 import Foundation
 
+struct DownloadSource: Codable, Hashable, Sendable, Identifiable {
+    let id: String
+    let title: String
+    let kind: MusicCollectionKind
+
+    var displayKind: String {
+        switch kind {
+        case .playlist: return "Playlist"
+        case .album: return "Album"
+        case .artist: return "Artist"
+        }
+    }
+}
+
 // MARK: - DownloadRecord
 
 struct DownloadRecord: Codable, Identifiable, Sendable {
@@ -10,6 +24,7 @@ struct DownloadRecord: Codable, Identifiable, Sendable {
     let downloadedAt: Date
     var fileSizeBytes: Int64
     var folderID: String?
+    var source: DownloadSource?
 
     var localURL: URL {
         DownloadService.downloadsDirectory.appendingPathComponent(fileName)
@@ -39,6 +54,7 @@ struct DownloadFolder: Codable, Identifiable, Hashable, Sendable {
 struct ActiveDownload: Identifiable {
     let id: String
     let track: Track
+    let source: DownloadSource?
     var progress: Double
     var isFailed: Bool
 }
@@ -106,16 +122,37 @@ final class DownloadService: NSObject, ObservableObject {
         downloads.filter { $0.folderID == folderID }
     }
 
+    func downloads(for sourceID: String) -> [DownloadRecord] {
+        downloads.filter { $0.source?.id == sourceID }
+    }
+
+    var downloadSources: [DownloadSource] {
+        let grouped = Dictionary(grouping: downloads) { $0.source }
+        return grouped.keys
+            .compactMap { $0 }
+            .sorted { lhs, rhs in
+                lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+    }
+
+    func isDownloading(source: DownloadSource) -> Bool {
+        activeDownloads.values.contains { $0.source?.id == source.id }
+    }
+
+    func downloadCount(for source: DownloadSource) -> Int {
+        downloads(for: source.id).count
+    }
+
     func folder(for record: DownloadRecord) -> DownloadFolder? {
         guard let folderID = record.folderID else { return nil }
         return folders.first(where: { $0.id == folderID })
     }
 
-    func startDownload(track: Track, streamURL: URL) {
+    func startDownload(track: Track, streamURL: URL, source: DownloadSource? = nil) {
         let key = trackKey(track)
         guard activeDownloads[key] == nil, !isDownloaded(track) else { return }
 
-        activeDownloads[key] = ActiveDownload(id: key, track: track, progress: 0, isFailed: false)
+        activeDownloads[key] = ActiveDownload(id: key, track: track, source: source, progress: 0, isFailed: false)
 
         let task = urlSession.downloadTask(with: streamURL) { [weak self] tempURL, response, error in
             Task { @MainActor [weak self] in
@@ -149,7 +186,8 @@ final class DownloadService: NSObject, ObservableObject {
                         fileName: fileName,
                         downloadedAt: Date(),
                         fileSizeBytes: fileSize,
-                        folderID: nil
+                        folderID: nil,
+                        source: source
                     )
                     self.downloads.append(record)
                     self.saveMetadata()
@@ -218,6 +256,15 @@ final class DownloadService: NSObject, ObservableObject {
         )
 
         folders.insert(folder, at: 0)
+        saveFolders()
+    }
+
+    func renameFolder(_ folder: DownloadFolder, to name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else { return }
+        guard let index = folders.firstIndex(where: { $0.id == folder.id }) else { return }
+
+        folders[index].name = trimmedName
         saveFolders()
     }
 
