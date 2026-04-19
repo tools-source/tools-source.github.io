@@ -66,6 +66,8 @@ final class AppState: ObservableObject {
     private let localFavoritesMixPlaylistID = "local-favorites-mix"
     private let deviceProfileID = "device-local-profile"
     private let likedSongsAccountSyncCooldown: TimeInterval = 300
+    private let maxConcurrentBatchStreamResolutions = 3
+    private let batchDownloadResolveSpacingNanoseconds: UInt64 = 250_000_000
 
     init(
         authService: AuthProviding,
@@ -740,20 +742,29 @@ final class AppState: ObservableObject {
         }
         guard pendingTracks.isEmpty == false else { return }
 
-        await withTaskGroup(of: Void.self) { group in
-            for track in pendingTracks {
-                group.addTask { [weak self] in
-                    guard let self else { return }
-                    do {
-                        if let streamURL = try await self.playbackService.resolveStreamURL(for: track) {
-                            await MainActor.run {
-                                self.downloadService.startDownload(track: track, streamURL: streamURL, source: source)
+        for startIndex in stride(from: 0, to: pendingTracks.count, by: maxConcurrentBatchStreamResolutions) {
+            let endIndex = min(startIndex + maxConcurrentBatchStreamResolutions, pendingTracks.count)
+            let batch = Array(pendingTracks[startIndex..<endIndex])
+
+            await withTaskGroup(of: Void.self) { group in
+                for track in batch {
+                    group.addTask { [weak self] in
+                        guard let self else { return }
+                        do {
+                            if let streamURL = try await self.playbackService.resolveStreamURL(for: track) {
+                                await MainActor.run {
+                                    self.downloadService.startDownload(track: track, streamURL: streamURL, source: source)
+                                }
                             }
+                        } catch {
+                            print("[AppState] Failed to resolve stream for batch download: \(error.localizedDescription)")
                         }
-                    } catch {
-                        print("[AppState] Failed to resolve stream for batch download: \(error.localizedDescription)")
                     }
                 }
+            }
+
+            if endIndex < pendingTracks.count {
+                try? await Task.sleep(nanoseconds: batchDownloadResolveSpacingNanoseconds)
             }
         }
     }
