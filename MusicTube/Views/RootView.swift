@@ -143,37 +143,10 @@ private struct PlaylistPickerSheet: View {
                                 .font(.headline)
                                 .foregroundStyle(.white)
 
-                            ForEach(appState.customPlaylists) { playlist in
-                                Button {
-                                    appState.addPlaylistPickerTrack(to: playlist)
-                                    dismiss()
-                                } label: {
-                                    HStack(spacing: 12) {
-                                        AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 10)
-                                            .frame(width: 48, height: 48)
-
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(playlist.title)
-                                                .font(.subheadline.weight(.semibold))
-                                                .foregroundStyle(.white)
-                                            Text(playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks")
-                                                .font(.caption)
-                                                .foregroundStyle(Color.white.opacity(0.58))
-                                        }
-
-                                        Spacer()
-
-                                        Image(systemName: "plus.circle.fill")
-                                            .font(.title3)
-                                            .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
-                                    }
-                                    .padding(14)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                            .fill(Color.white.opacity(0.06))
-                                    )
+                            VStack(spacing: 0) {
+                                ForEach(Array(appState.customPlaylists.enumerated()), id: \.element.id) { index, playlist in
+                                    playlistSelectionRow(playlist, isLast: index == appState.customPlaylists.count - 1)
                                 }
-                                .buttonStyle(.plain)
                             }
 
                             Divider()
@@ -289,9 +262,16 @@ private struct PlaylistPickerSheet: View {
                     .font(.footnote)
                     .foregroundStyle(Color.white.opacity(0.58))
             } else {
-                VStack(spacing: 10) {
-                    ForEach(addSongResults.prefix(12)) { track in
+                VStack(spacing: 0) {
+                    let visibleResults = Array(addSongResults.prefix(12))
+                    ForEach(Array(visibleResults.enumerated()), id: \.element.id) { index, track in
                         addSongRow(track)
+
+                        if index < visibleResults.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 60)
+                        }
                     }
                 }
             }
@@ -301,17 +281,17 @@ private struct PlaylistPickerSheet: View {
     private func addSongRow(_ track: Track) -> some View {
         HStack(spacing: 12) {
             AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
-                .frame(width: 48, height: 48)
+                .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(track.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(1)
 
                 Text(track.artist)
                     .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.58))
+                    .foregroundStyle(Color.white.opacity(0.55))
                     .lineLimit(1)
             }
 
@@ -333,11 +313,7 @@ private struct PlaylistPickerSheet: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.white.opacity(0.06))
-        )
+        .padding(.vertical, 8)
     }
 
     private func scheduleSongSearch(for query: String) {
@@ -368,23 +344,58 @@ private struct PlaylistPickerSheet: View {
             AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
                 .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(track.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 Text(track.artist)
                     .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.6))
+                    .foregroundStyle(Color.white.opacity(0.55))
             }
 
             Spacer()
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.05))
-        )
+        .padding(.vertical, 8)
+    }
+
+    private func playlistSelectionRow(_ playlist: Playlist, isLast: Bool) -> some View {
+        Button {
+            appState.addPlaylistPickerTrack(to: playlist)
+            dismiss()
+        } label: {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 10)
+                        .frame(width: 52, height: 52)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(playlist.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+
+                        Text(playlist.itemCount == 1 ? "1 track" : "\(playlist.itemCount) tracks")
+                            .font(.caption)
+                            .foregroundStyle(Color.white.opacity(0.55))
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color(red: 1, green: 0.23, blue: 0.42))
+                }
+                .padding(.vertical, 8)
+
+                if isLast == false {
+                    Divider()
+                        .overlay(Color.white.opacity(0.07))
+                        .padding(.leading, 60)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 

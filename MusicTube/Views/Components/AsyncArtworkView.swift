@@ -96,16 +96,24 @@ private final class CachedArtworkLoader: ObservableObject {
     private let maxPixelSize = ArtworkPixelSize.list
 
     func load(url: URL?) {
-        guard let url else { image = nil; return }
+        guard let url else {
+            loadTask?.cancel()
+            loadTask = nil
+            loadedURL = nil
+            image = nil
+            return
+        }
         guard url != loadedURL else { return }
+
+        loadTask?.cancel()
         loadedURL = url
+        image = nil
 
         if let cached = ImageCache.shared.image(for: url, maxPixelSize: maxPixelSize) {
             image = cached
             return
         }
 
-        loadTask?.cancel()
         let maxPixelSize = self.maxPixelSize
         loadTask = Task { [weak self] in
             guard let image = await ArtworkRepository.shared.image(for: url, maxPixelSize: maxPixelSize) else { return }
@@ -148,6 +156,9 @@ struct AsyncArtworkView: View {
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .task(id: url) {
                 loader.load(url: url)
+            }
+            .onDisappear {
+                loader.cancel()
             }
     }
 }

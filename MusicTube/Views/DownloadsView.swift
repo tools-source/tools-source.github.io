@@ -367,20 +367,27 @@ private struct ActiveRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncArtworkView(url: active.track.artworkURL, cornerRadius: 8)
-                .frame(width: 42, height: 42)
+            AsyncArtworkView(url: active.track.artworkURL, cornerRadius: 10)
+                .frame(width: 52, height: 52)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(active.track.title)
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                if let source = active.source {
-                    Text(source.title)
+                HStack(spacing: 4) {
+                    Text(active.track.artist)
                         .font(.caption)
-                        .foregroundStyle(Color.white.opacity(0.45))
+                        .foregroundStyle(Color.white.opacity(0.55))
                         .lineLimit(1)
+
+                    if let source = active.source {
+                        Text("· \(source.title)")
+                            .font(.caption)
+                            .foregroundStyle(Color.white.opacity(0.38))
+                            .lineLimit(1)
+                    }
                 }
 
                 DownloadProgressBar(progress: active.progress)
@@ -389,13 +396,15 @@ private struct ActiveRow: View {
 
             Button(action: onCancel) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.body)
-                    .foregroundStyle(Color.white.opacity(0.35))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.6))
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.10)))
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
     }
 }
 
@@ -423,35 +432,35 @@ private struct CompactDownloadRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onPlay) {
-                AsyncArtworkView(url: record.track.artworkURL, cornerRadius: 8)
-                    .frame(width: 42, height: 42)
+                AsyncArtworkView(url: record.track.artworkURL, cornerRadius: 10)
+                    .frame(width: 52, height: 52)
             }
             .buttonStyle(.plain)
 
             Button(action: onPlay) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(record.track.title)
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
                     HStack(spacing: 6) {
                         Text(record.track.artist)
                             .font(.caption)
-                            .foregroundStyle(Color.white.opacity(0.5))
+                            .foregroundStyle(Color.white.opacity(0.55))
                             .lineLimit(1)
 
                         if let source = record.source {
                             Text("· \(source.title)")
                                 .font(.caption)
-                                .foregroundStyle(Color.white.opacity(0.32))
+                                .foregroundStyle(Color.white.opacity(0.38))
                                 .lineLimit(1)
                         }
 
                         if let folder = downloadService.folder(for: record) {
                             Text("· \(folder.name)")
                                 .font(.caption)
-                                .foregroundStyle(Color.white.opacity(0.32))
+                                .foregroundStyle(Color.white.opacity(0.38))
                                 .lineLimit(1)
                         }
                     }
@@ -468,14 +477,15 @@ private struct CompactDownloadRow: View {
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.white.opacity(0.3))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.62))
                     .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.vertical, 8)
     }
 }
 
@@ -500,9 +510,10 @@ private struct DownloadFolderMenu: View {
             }
         } label: {
             Image(systemName: "folder")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(Color.white.opacity(0.45))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.8))
                 .frame(width: 32, height: 32)
+                .background(Circle().fill(Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
     }

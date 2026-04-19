@@ -93,24 +93,24 @@ struct TrackRowView: View {
     let track: Track
     var showsNowPlayingIndicator: Bool = false
     var showsDownloadButton: Bool = false
+    var prefetchPlaybackOnAppear: Bool = true
     let onTap: () -> Void
 
     @StateObject private var downloadService = DownloadService.shared
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button(action: onTap) {
-                HStack(spacing: 14) {
-                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
-                        .frame(width: 56, height: 56)
+                HStack(spacing: 12) {
+                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
+                        .frame(width: 52, height: 52)
 
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(track.title)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
 
                         HStack(spacing: 4) {
                             if isCurrentlyPlaying {
@@ -119,7 +119,7 @@ struct TrackRowView: View {
                                     .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
 
                                 Text("Playing")
-                                    .font(.footnote.weight(.semibold))
+                                    .font(.caption.weight(.semibold))
                                     .foregroundStyle(Color(red: 1, green: 0.24, blue: 0.43))
                             }
 
@@ -136,12 +136,21 @@ struct TrackRowView: View {
                             }
 
                             Text(track.artist)
-                                .font(.footnote)
-                                .foregroundStyle(Color.white.opacity(0.58))
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.55))
                                 .lineLimit(1)
+
+                            if let duration = track.formattedDuration {
+                                Text("· \(duration)")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.38))
+                                    .fixedSize()
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
             }
@@ -165,20 +174,11 @@ struct TrackRowView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(Color.white.opacity(0.03))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-                }
-        )
+        .padding(.vertical, 8)
+        .task(id: track.playbackKey) {
+            guard prefetchPlaybackOnAppear else { return }
+            appState.prefetchPlayback(for: [track])
+        }
     }
 
     private var isCurrentlyPlaying: Bool {

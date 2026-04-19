@@ -178,10 +178,16 @@ struct LibraryView: View {
             if appState.isLoadingPlaylists && appState.playlists.isEmpty {
                 loadingLabel("Syncing liked songs...")
             } else if let likedSongs = appState.likedSongsPlaylist {
-                NavigationLink(value: likedSongs) {
-                    PlaylistRow(playlist: likedSongs)
+                VStack(alignment: .leading, spacing: 10) {
+                    NavigationLink(value: likedSongs) {
+                        PlaylistRow(playlist: likedSongs)
+                    }
+                    .buttonStyle(.plain)
+
+                    if appState.isSyncingLikedSongs {
+                        loadingLabel("Importing the rest of your YouTube liked songs...")
+                    }
                 }
-                .buttonStyle(.plain)
             } else {
                 Text("Tap the heart on a song to keep it here.")
                     .font(.subheadline)
@@ -212,14 +218,20 @@ struct LibraryView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
             } else {
-                VStack(spacing: 12) {
-                    ForEach(appState.customPlaylists) { playlist in
+                VStack(spacing: 0) {
+                    ForEach(Array(appState.customPlaylists.enumerated()), id: \.element.id) { index, playlist in
                         NavigationLink(value: playlist) {
                             PlaylistRow(playlist: playlist) {
                                 appState.downloadPlaylist(playlist)
                             }
                         }
                         .buttonStyle(.plain)
+
+                        if index < appState.customPlaylists.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 64)
+                        }
                     }
                 }
             }
@@ -233,12 +245,18 @@ struct LibraryView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
             } else {
-                VStack(spacing: 12) {
-                    ForEach(appState.savedCollections) { collection in
+                VStack(spacing: 0) {
+                    ForEach(Array(appState.savedCollections.enumerated()), id: \.element.id) { index, collection in
                         NavigationLink(value: collection) {
                             SavedCollectionRow(collection: collection)
                         }
                         .buttonStyle(.plain)
+
+                        if index < appState.savedCollections.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 64)
+                        }
                     }
                 }
             }
@@ -287,18 +305,18 @@ private struct PlaylistRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 16)
-                .frame(width: 64, height: 64)
+            AsyncArtworkView(url: playlist.artworkURL, cornerRadius: 10)
+                .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(playlist.title)
-                    .font(.headline.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(1)
 
                 Text(itemCountLabel)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.white.opacity(0.6))
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.55))
             }
 
             Spacer(minLength: 10)
@@ -306,10 +324,10 @@ private struct PlaylistRow: View {
             if let onDownload {
                 Button(action: onDownload) {
                     Image(systemName: "arrow.down.circle")
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.75))
-                        .frame(width: 38, height: 38)
-                        .background(Color.white.opacity(0.08))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -319,7 +337,7 @@ private struct PlaylistRow: View {
                 .font(.footnote.weight(.bold))
                 .foregroundStyle(Color.white.opacity(0.35))
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
     }
 
     private var itemCountLabel: String {
@@ -343,19 +361,19 @@ private struct SavedCollectionRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 16)
-                .frame(width: 64, height: 64)
+            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 10)
+                .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(collection.title)
-                    .font(.headline.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(1)
 
                 Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.white.opacity(0.6))
-                    .lineLimit(2)
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 10)
@@ -364,7 +382,7 @@ private struct SavedCollectionRow: View {
                 .font(.footnote.weight(.bold))
                 .foregroundStyle(Color.white.opacity(0.35))
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
     }
 
     private var subtitle: String {
@@ -400,23 +418,30 @@ struct PlaylistDetailView: View {
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: 14) {
+            LazyVStack(spacing: 0) {
                 if isLoading {
                     loadingCard("Loading playlist tracks...")
                 } else if tracks.isEmpty {
                     emptyCard("This playlist is empty for now.")
                 } else {
-                    ForEach(tracks) { track in
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                         if playlist.kind == .custom {
                             editableTrackRow(track)
                         } else {
                             TrackRowView(
                                 track: track,
                                 showsNowPlayingIndicator: true,
-                                showsDownloadButton: true
+                                showsDownloadButton: true,
+                                prefetchPlaybackOnAppear: false
                             ) {
                                 appState.play(track: track, queue: tracks)
                             }
+                        }
+
+                        if index < tracks.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 64)
                         }
                     }
                 }
@@ -507,16 +532,23 @@ struct PlaylistDetailView: View {
             .presentationDetents([.height(220)])
         }
         .task {
-            guard tracks.isEmpty else { return }
-            tracks = await appState.loadPlaylistItems(
-                for: playlist,
-                forceRefresh: playlist.kind == .likedMusic
-            )
-            isLoading = false
+            await loadInitialTracks()
+        }
+        .onChange(of: appState.isSyncingLikedSongs) { _, isSyncing in
+            guard playlist.kind == .likedMusic, isSyncing == false else { return }
+            Task {
+                tracks = await appState.loadPlaylistItems(
+                    for: playlist,
+                    forceRefresh: false,
+                    surfaceErrors: false
+                )
+                prefetchVisibleTracks(from: tracks)
+            }
         }
         .refreshable {
             tracks = await appState.loadPlaylistItems(for: playlist, forceRefresh: true)
             isLoading = false
+            prefetchVisibleTracks(from: tracks)
         }
     }
 
@@ -556,20 +588,20 @@ struct PlaylistDetailView: View {
     }
 
     private func editableTrackRow(_ track: Track) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Button {
                 appState.play(track: track, queue: tracks)
             } label: {
-                HStack(spacing: 14) {
-                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 14)
-                        .frame(width: 56, height: 56)
+                HStack(spacing: 12) {
+                    AsyncArtworkView(url: track.artworkURL, cornerRadius: 10)
+                        .frame(width: 52, height: 52)
 
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(track.title)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
 
                         HStack(spacing: 4) {
                             if appState.nowPlaying?.playbackKey == track.playbackKey, appState.isPlaying {
@@ -579,25 +611,23 @@ struct PlaylistDetailView: View {
                             }
 
                             Text(track.artist)
-                                .font(.footnote)
-                                .foregroundStyle(Color.white.opacity(0.58))
+                                .font(.caption)
+                                .foregroundStyle(Color.white.opacity(0.55))
                                 .lineLimit(1)
 
                             if let duration = track.formattedDuration {
                                 Text("· \(duration)")
-                                    .font(.footnote)
-                                    .foregroundStyle(Color.white.opacity(0.48))
-                                    .lineLimit(1)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.38))
+                                    .fixedSize()
                             }
                         }
                     }
 
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 8)
                 }
             }
             .buttonStyle(.plain)
-
-            Spacer(minLength: 8)
 
             DownloadButton(track: track, size: 36)
 
@@ -631,20 +661,34 @@ struct PlaylistDetailView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(Color.white.opacity(0.03))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-                }
+        .padding(.vertical, 8)
+    }
+
+    private func loadInitialTracks() async {
+        guard tracks.isEmpty else { return }
+
+        let initialTracks = await appState.loadPlaylistItems(for: playlist, forceRefresh: false)
+        tracks = initialTracks
+        isLoading = false
+        prefetchVisibleTracks(from: initialTracks)
+
+        guard playlist.kind == .likedMusic else { return }
+        guard appState.isSyncingLikedSongs == false else { return }
+
+        let refreshedTracks = await appState.loadPlaylistItems(
+            for: playlist,
+            forceRefresh: true,
+            surfaceErrors: false
         )
+        guard refreshedTracks != initialTracks else { return }
+        tracks = refreshedTracks
+        prefetchVisibleTracks(from: refreshedTracks)
+    }
+
+    private func prefetchVisibleTracks(from tracks: [Track]) {
+        let warmTracks = Array(tracks.prefix(3))
+        guard warmTracks.isEmpty == false else { return }
+        appState.prefetchPlayback(for: warmTracks)
     }
 }
 
@@ -665,13 +709,22 @@ struct CollectionDetailView: View {
                 } else if tracks.isEmpty {
                     loadingCard("No playable songs were found for this \(collectionTitleLowercased).")
                 } else {
-                    ForEach(tracks) { track in
-                        TrackRowView(
-                            track: track,
-                            showsNowPlayingIndicator: true,
-                            showsDownloadButton: true
-                        ) {
-                            appState.play(track: track, queue: tracks)
+                    VStack(spacing: 0) {
+                        ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                            TrackRowView(
+                                track: track,
+                                showsNowPlayingIndicator: true,
+                                showsDownloadButton: true,
+                                prefetchPlaybackOnAppear: false
+                            ) {
+                                appState.play(track: track, queue: tracks)
+                            }
+
+                            if index < tracks.count - 1 {
+                                Divider()
+                                    .overlay(Color.white.opacity(0.07))
+                                    .padding(.leading, 64)
+                            }
                         }
                     }
                 }
@@ -693,10 +746,12 @@ struct CollectionDetailView: View {
             guard tracks.isEmpty else { return }
             tracks = await appState.loadCollectionItems(for: collection)
             isLoading = false
+            prefetchVisibleTracks(from: tracks)
         }
         .refreshable {
             tracks = await appState.loadCollectionItems(for: collection, forceRefresh: true)
             isLoading = false
+            prefetchVisibleTracks(from: tracks)
         }
     }
 
@@ -782,5 +837,11 @@ struct CollectionDetailView: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color.white.opacity(0.07))
         )
+    }
+
+    private func prefetchVisibleTracks(from tracks: [Track]) {
+        let warmTracks = Array(tracks.prefix(3))
+        guard warmTracks.isEmpty == false else { return }
+        appState.prefetchPlayback(for: warmTracks)
     }
 }

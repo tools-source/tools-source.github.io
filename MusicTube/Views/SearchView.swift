@@ -1,5 +1,11 @@
 import SwiftUI
 
+private enum SearchResultTab: String, CaseIterable {
+    case songs = "Songs"
+    case albums = "Albums"
+    case artists = "Artists"
+}
+
 struct SearchView: View {
     @EnvironmentObject private var appState: AppState
     @State private var searchTask: Task<Void, Never>?
@@ -7,6 +13,7 @@ struct SearchView: View {
     @State private var isLoadingSuggestedTracks = false
     @State private var immediateSearchQuery: String?
     @State private var visibleSongCount = 10
+    @State private var selectedTab: SearchResultTab = .songs
 
     var body: some View {
         NavigationStack {
@@ -36,61 +43,8 @@ struct SearchView: View {
                         }
 
                         resultSummary
-
-                        if appState.searchResults.songs.isEmpty == false {
-                            let visibleSongs = Array(appState.searchResults.songs.prefix(visibleSongCount))
-                            resultSection(title: "Songs") {
-                                ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, track in
-                                    TrackRowView(
-                                        track: track,
-                                        showsNowPlayingIndicator: true,
-                                        showsDownloadButton: true
-                                    ) {
-                                        playSearchTrack(track)
-                                    }
-                                    .onAppear {
-                                        handleSongAppearance(index: index, displayedCount: visibleSongs.count)
-                                    }
-                                }
-
-                                if appState.isLoadingMoreSearchResults {
-                                    statusCard(label: "Loading more songs...")
-                                }
-                            }
-                        }
-
-                        if appState.searchResults.playlists.isEmpty == false {
-                            resultSection(title: "Playlists") {
-                                ForEach(appState.searchResults.playlists) { collection in
-                                    NavigationLink(value: collection) {
-                                        MusicCollectionRow(collection: collection)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-
-                        if appState.searchResults.albums.isEmpty == false {
-                            resultSection(title: "Albums") {
-                                ForEach(appState.searchResults.albums) { collection in
-                                    NavigationLink(value: collection) {
-                                        MusicCollectionRow(collection: collection)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-
-                        if appState.searchResults.artists.isEmpty == false {
-                            resultSection(title: "Artists") {
-                                ForEach(appState.searchResults.artists) { collection in
-                                    NavigationLink(value: collection) {
-                                        MusicCollectionRow(collection: collection)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
+                        resultTabs
+                        searchResultsContent
                     }
                 }
                 .padding(.horizontal, 20)
@@ -116,6 +70,9 @@ struct SearchView: View {
                 if shouldSearchImmediately {
                     immediateSearchQuery = nil
                 }
+            }
+            .onChange(of: searchResultCountsKey) { _, _ in
+                syncSelectedTabWithResults()
             }
             .onChange(of: appState.searchResults.songs.count) { _, newCount in
                 if newCount < visibleSongCount {
@@ -148,18 +105,46 @@ struct SearchView: View {
     }
 
     private var resultSummary: some View {
-        Text("\(appState.searchResults.totalResultCount) results")
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Color.white.opacity(0.6))
+        VStack(alignment: .leading, spacing: 14) {
+            Text("\(appState.searchResults.totalResultCount) results")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.6))
+        }
     }
 
-    private func resultSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.white)
+    private var resultTabs: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(availableTabs, id: \.self) { tab in
+                    Button {
+                        selectedTab = tab
+                    } label: {
+                        Text(tab.rawValue)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(selectedTab == tab ? .black : .white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule()
+                                    .fill(selectedTab == tab ? Color.white : Color.white.opacity(0.08))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
 
-            content()
+    @ViewBuilder
+    private var searchResultsContent: some View {
+        switch selectedTab {
+        case .songs:
+            songResultsSection
+        case .albums:
+            albumResultsSection
+        case .artists:
+            artistResultsSection
         }
     }
 
@@ -183,14 +168,119 @@ struct SearchView: View {
         "\(trimmedSearchQuery)|\(appState.recentSearches.joined(separator: "||"))"
     }
 
+    private var searchResultCountsKey: String {
+        [
+            String(appState.searchResults.songs.count),
+            String(appState.searchResults.playlists.count),
+            String(appState.searchResults.albums.count),
+            String(appState.searchResults.artists.count)
+        ].joined(separator: "|")
+    }
+
+    private var availableTabs: [SearchResultTab] {
+        var tabs: [SearchResultTab] = []
+        if appState.searchResults.songs.isEmpty == false {
+            tabs.append(.songs)
+        }
+        if appState.searchResults.albums.isEmpty == false || appState.searchResults.playlists.isEmpty == false {
+            tabs.append(.albums)
+        }
+        if appState.searchResults.artists.isEmpty == false {
+            tabs.append(.artists)
+        }
+        return tabs.isEmpty ? SearchResultTab.allCases : tabs
+    }
+
+    private var visibleSongs: [Track] {
+        Array(appState.searchResults.songs.prefix(visibleSongCount))
+    }
+
+    private var songResultsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if appState.searchResults.songs.isEmpty {
+                statusCard(label: "No songs matched that search.")
+            } else {
+                ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, track in
+                    RecommendedRow(track: track) {
+                        playSearchTrack(track)
+                    }
+                    .onAppear {
+                        handleSongAppearance(index: index, displayedCount: visibleSongs.count)
+                    }
+
+                    if index < visibleSongs.count - 1 {
+                        Divider()
+                            .overlay(Color.white.opacity(0.07))
+                            .padding(.leading, 64)
+                    }
+                }
+
+                if appState.isLoadingMoreSearchResults {
+                    statusCard(label: "Loading more songs...")
+                        .padding(.top, 16)
+                }
+            }
+        }
+    }
+
+    private var albumResultsSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if appState.searchResults.albums.isEmpty && appState.searchResults.playlists.isEmpty {
+                statusCard(label: "No albums or playlists matched that search.")
+            }
+
+            if appState.searchResults.albums.isEmpty == false {
+                collectionSection(title: "Albums", collections: appState.searchResults.albums)
+            }
+
+            if appState.searchResults.playlists.isEmpty == false {
+                collectionSection(title: "Playlists", collections: appState.searchResults.playlists)
+            }
+        }
+    }
+
+    private var artistResultsSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if appState.searchResults.artists.isEmpty {
+                statusCard(label: "No artists matched that search.")
+            } else {
+                collectionSection(title: "Artists", collections: appState.searchResults.artists)
+            }
+        }
+    }
+
+    private func collectionSection(title: String, collections: [MusicCollection]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white.opacity(0.82))
+
+            VStack(spacing: 0) {
+                ForEach(Array(collections.enumerated()), id: \.element.id) { index, collection in
+                    NavigationLink(value: collection) {
+                        SearchCollectionRow(collection: collection)
+                    }
+                    .buttonStyle(.plain)
+
+                    if index < collections.count - 1 {
+                        Divider()
+                            .overlay(Color.white.opacity(0.07))
+                            .padding(.leading, 64)
+                    }
+                }
+            }
+        }
+    }
+
     private var recentSearchesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Recent searches")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.white.opacity(0.72))
 
-            VStack(spacing: 10) {
-                ForEach(Array(appState.recentSearches.prefix(8)), id: \.self) { query in
+            VStack(spacing: 0) {
+                let recentQueries = Array(appState.recentSearches.prefix(8))
+                ForEach(Array(recentQueries.enumerated()), id: \.element) { index, query in
                     HStack(spacing: 12) {
                         Button {
                             selectSuggestion(query)
@@ -220,12 +310,13 @@ struct SearchView: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Delete \(query)")
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(Color.white.opacity(0.07))
-                    )
+                    .padding(.vertical, 8)
+
+                    if index < recentQueries.count - 1 {
+                        Divider()
+                            .overlay(Color.white.opacity(0.07))
+                            .padding(.leading, 38)
+                    }
                 }
             }
         }
@@ -242,14 +333,16 @@ struct SearchView: View {
             } else if suggestedTracks.isEmpty {
                 statusCard(label: "Search and play a few songs to unlock personalized suggestions.")
             } else {
-                VStack(spacing: 12) {
-                    ForEach(suggestedTracks) { track in
-                        TrackRowView(
-                            track: track,
-                            showsNowPlayingIndicator: true,
-                            showsDownloadButton: true
-                        ) {
+                VStack(spacing: 0) {
+                    ForEach(Array(suggestedTracks.enumerated()), id: \.element.id) { index, track in
+                        RecommendedRow(track: track) {
                             playSuggestedTrack(track)
+                        }
+
+                        if index < suggestedTracks.count - 1 {
+                            Divider()
+                                .overlay(Color.white.opacity(0.07))
+                                .padding(.leading, 64)
                         }
                     }
                 }
@@ -352,53 +445,60 @@ struct SearchView: View {
         guard trimmedQuery.isEmpty == false else {
             appState.clearSearch()
             visibleSongCount = 10
+            selectedTab = .songs
             return
         }
 
         searchTask = Task {
             if immediately == false {
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                try? await Task.sleep(nanoseconds: 220_000_000)
             }
 
             guard Task.isCancelled == false else { return }
             _ = await appState.search(query: trimmedQuery)
         }
     }
+
+    private func syncSelectedTabWithResults() {
+        guard availableTabs.contains(selectedTab) == false else { return }
+        selectedTab = availableTabs.first ?? .songs
+    }
 }
 
-private struct MusicCollectionRow: View {
+private struct SearchCollectionRow: View {
     @EnvironmentObject private var appState: AppState
     let collection: MusicCollection
 
     var body: some View {
-        HStack(spacing: 14) {
-            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 14)
-                .frame(width: 58, height: 58)
+        HStack(spacing: 12) {
+            AsyncArtworkView(url: collection.artworkURL, cornerRadius: 10)
+                .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(collection.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 Text(detailLine)
                     .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.58))
-                    .lineLimit(2)
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button {
                     appState.downloadCollection(collection)
                 } label: {
                     Image(systemName: "arrow.down.circle")
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.78))
-                        .frame(width: 38, height: 38)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Circle())
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
                 }
                 .buttonStyle(.plain)
 
@@ -406,21 +506,15 @@ private struct MusicCollectionRow: View {
                     appState.toggleCollectionSaved(collection)
                 } label: {
                     Image(systemName: appState.isCollectionSaved(collection) ? "bookmark.fill" : "bookmark")
-                        .font(.headline)
-                        .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : Color.white.opacity(0.68))
-                        .frame(width: 38, height: 38)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Circle())
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(appState.isCollectionSaved(collection) ? Color(red: 1, green: 0.23, blue: 0.42) : .white)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.06))
-        )
+        .padding(.vertical, 8)
     }
 
     private var detailLine: String {

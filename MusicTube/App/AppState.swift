@@ -30,6 +30,7 @@ final class AppState: ObservableObject {
     @Published private(set) var libraryStatusMessage: String?
     @Published private(set) var likedTrackIDs: Set<String> = []
     @Published private(set) var savedTrackIDs: Set<String> = []
+    @Published private(set) var isSyncingLikedSongs = false
     @Published private(set) var hasLoadedHome = false
     @Published private(set) var hasLoadedLibrary = false
     @Published private(set) var sleepTimerEndDate: Date?
@@ -46,6 +47,7 @@ final class AppState: ObservableObject {
     private var session: YouTubeSession?
     private var sleepTimerTask: Task<Void, Never>?
     private var relatedTracksTask: Task<Void, Never>?
+    private var likedSongsHydrationTask: Task<Void, Never>?
     let downloadService = DownloadService.shared
     private let authService: AuthProviding
     private let catalogService: MusicCatalogProviding
@@ -54,6 +56,7 @@ final class AppState: ObservableObject {
     private var playlistCache: [String: [Track]] = [:]
     private var collectionCache: [String: [Track]] = [:]
     private var cancellables: Set<AnyCancellable> = []
+    private var accountLikedTrackIDs: Set<String> = []
     private var isRefreshingDashboard = false
     private var activeSearchRequestID: UUID?
     private var lastLikedSongsAccountSyncDate: Date?
@@ -497,6 +500,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    func prefetchPlayback(for tracks: [Track]) {
+        playbackService.prefetchStreams(for: tracks)
+    }
+
     func playNextTrack() {
         playbackService.playNextTrack()
         AppContainer.shared.carPlayManager?.refresh(using: self)
@@ -520,10 +527,13 @@ final class AppState: ObservableObject {
             do {
                 let loadedPlaylists = try await catalogService.loadPlaylists(accessToken: accessToken)
                 playlists = mergedLibraryPlaylists(remotePlaylists: loadedPlaylists)
-                await hydrateLikedSongsPlaylistIfNeeded(forceRefresh: true)
-                lastLikedSongsAccountSyncDate = Date()
                 trimCachesToValidCollections()
-                libraryStatusMessage = libraryStatusMessageText(for: playlists, savedCollections: savedCollections)
+                if let likedPlaylist = likedSongsPlaylist, isLocalCollectionID(likedPlaylist.id) == false {
+                    libraryStatusMessage = "Syncing all liked songs from YouTube..."
+                    startLikedSongsHydration(forceRefresh: true)
+                } else {
+                    libraryStatusMessage = libraryStatusMessageText(for: playlists, savedCollections: savedCollections)
+                }
                 AppContainer.shared.carPlayManager?.refresh(using: self)
                 return
             } catch {
@@ -534,6 +544,7 @@ final class AppState: ObservableObject {
         }
 
         let preservedLibraryStatus = libraryStatusMessage
+        cancelLikedSongsHydration(clearAccountLikes: false)
         playlists = mergedLibraryPlaylists(remotePlaylists: [])
         trimCachesToValidCollections()
         libraryStatusMessage = preservedLibraryStatus ?? libraryStatusMessageText(for: playlists, savedCollections: savedCollections)
@@ -913,8 +924,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        lastLikedSongsAccountSyncDate = Date()
-        await hydrateLikedSongsPlaylistIfNeeded(forceRefresh: true)
+        startLikedSongsHydration(forceRefresh: true)
     }
 
     private func restoreSession() async {
@@ -961,6 +971,7 @@ final class AppState: ObservableObject {
         sleepTimerTask = nil
         relatedTracksTask?.cancel()
         relatedTracksTask = nil
+        cancelLikedSongsHydration()
         playbackService.stop()
         featuredTracks = []
         recentTracks = []
@@ -987,10 +998,12 @@ final class AppState: ObservableObject {
         hasLoadedHome = false
         hasLoadedLibrary = false
         isRefreshingDashboard = false
+        isSyncingLikedSongs = false
         sleepTimerEndDate = nil
         playlistPickerTrack = nil
         isPlaylistPickerPresented = false
         lastLikedSongsAccountSyncDate = nil
+        accountLikedTrackIDs = []
     }
 
     private func clearRemoteState() {
@@ -998,6 +1011,7 @@ final class AppState: ObservableObject {
         recentTracks = []
         playlists = []
         suggestedMixes = []
+        cancelLikedSongsHydration()
         playlistCache = playlistCache.filter { isLocalCollectionID($0.key) }
         collectionCache.removeAll()
         hasLoadedHome = false
@@ -1398,7 +1412,7 @@ final class AppState: ObservableObject {
 
     private func syncLocalMusicProfileState() {
         let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
-        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier)).union(accountLikedTrackIDs)
         savedTrackIDs = Set(snapshot.savedTracks.map(trackIdentifier))
         savedCollections = snapshot.savedCollections
         recentSearches = snapshot.recentSearches
@@ -1545,6 +1559,7 @@ final class AppState: ObservableObject {
 
     private func hydrateLikedSongsPlaylistIfNeeded(forceRefresh: Bool) async {
         guard let likedPlaylist = likedSongsPlaylist else {
+            accountLikedTrackIDs = []
             syncLocalMusicProfileState()
             return
         }
@@ -1557,16 +1572,23 @@ final class AppState: ObservableObject {
         var resolvedTracks = tracks
 
         if isLocalCollectionID(likedPlaylist.id) == false {
-            let mergedSnapshot = localMusicProfileStore.mergeLikedTracks(tracks, profileID: currentProfileID)
-            resolvedTracks = mergedSnapshot.likedTracks
+            let mergedSnapshot = localMusicProfileStore.mergeLikedTracks(
+                Array(tracks.prefix(200)),
+                profileID: currentProfileID
+            )
+            accountLikedTrackIDs = Set(tracks.map(trackIdentifier))
+            resolvedTracks = deduplicatedTracks(tracks + mergedSnapshot.likedTracks)
             if resolvedTracks.isEmpty {
                 playlistCache.removeValue(forKey: likedPlaylist.id)
             } else {
                 playlistCache[likedPlaylist.id] = resolvedTracks
             }
+        } else {
+            accountLikedTrackIDs = []
         }
 
-        likedTrackIDs = Set(resolvedTracks.map(trackIdentifier))
+        likedTrackIDs = Set(localMusicProfileStore.snapshot(for: currentProfileID).likedTracks.map(trackIdentifier))
+            .union(accountLikedTrackIDs)
 
         if let playlistIndex = playlists.firstIndex(where: { $0.id == likedPlaylist.id }) {
             playlists[playlistIndex] = Playlist(
@@ -1577,6 +1599,42 @@ final class AppState: ObservableObject {
                 itemCount: resolvedTracks.count,
                 kind: likedPlaylist.kind
             )
+        }
+    }
+
+    private func startLikedSongsHydration(forceRefresh: Bool) {
+        cancelLikedSongsHydration(clearAccountLikes: false)
+
+        guard let likedPlaylist = likedSongsPlaylist,
+              isLocalCollectionID(likedPlaylist.id) == false,
+              session?.accessToken != nil else {
+            accountLikedTrackIDs = []
+            syncLocalMusicProfileState()
+            libraryStatusMessage = libraryStatusMessageText(for: playlists, savedCollections: savedCollections)
+            return
+        }
+
+        isSyncingLikedSongs = true
+        libraryStatusMessage = "Syncing all liked songs from YouTube..."
+
+        likedSongsHydrationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.hydrateLikedSongsPlaylistIfNeeded(forceRefresh: forceRefresh)
+            guard Task.isCancelled == false else { return }
+            self.lastLikedSongsAccountSyncDate = Date()
+            self.isSyncingLikedSongs = false
+            self.libraryStatusMessage = self.libraryStatusMessageText(for: self.playlists, savedCollections: self.savedCollections)
+            AppContainer.shared.carPlayManager?.refresh(using: self)
+        }
+    }
+
+    private func cancelLikedSongsHydration(clearAccountLikes: Bool = true) {
+        likedSongsHydrationTask?.cancel()
+        likedSongsHydrationTask = nil
+        isSyncingLikedSongs = false
+        if clearAccountLikes {
+            accountLikedTrackIDs = []
+            syncLocalMusicProfileState()
         }
     }
 
