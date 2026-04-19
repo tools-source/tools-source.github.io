@@ -9,6 +9,7 @@ protocol AuthProviding {
 protocol MusicCatalogProviding {
     func loadHome(accessToken: String) async throws -> (featured: [Track], recent: [Track])
     func search(query: String, accessToken: String?) async throws -> SearchResponse
+    func loadMoreSearchResults(query: String, continuation: String, accessToken: String?) async throws -> SearchResponse
     func loadPlaylists(accessToken: String) async throws -> [Playlist]
     func loadPlaylistItems(for playlist: Playlist, accessToken: String) async throws -> [Track]
     func loadCollectionItems(for collection: MusicCollection, accessToken: String?) async throws -> [Track]

@@ -6,6 +6,7 @@ struct SearchView: View {
     @State private var suggestedTracks: [Track] = []
     @State private var isLoadingSuggestedTracks = false
     @State private var immediateSearchQuery: String?
+    @State private var visibleSongCount = 10
 
     var body: some View {
         NavigationStack {
@@ -37,8 +38,9 @@ struct SearchView: View {
                         resultSummary
 
                         if appState.searchResults.songs.isEmpty == false {
+                            let visibleSongs = Array(appState.searchResults.songs.prefix(visibleSongCount))
                             resultSection(title: "Songs") {
-                                ForEach(appState.searchResults.songs) { track in
+                                ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, track in
                                     TrackRowView(
                                         track: track,
                                         showsNowPlayingIndicator: true,
@@ -46,6 +48,13 @@ struct SearchView: View {
                                     ) {
                                         playSearchTrack(track)
                                     }
+                                    .onAppear {
+                                        handleSongAppearance(index: index, displayedCount: visibleSongs.count)
+                                    }
+                                }
+
+                                if appState.isLoadingMoreSearchResults {
+                                    statusCard(label: "Loading more songs...")
                                 }
                             }
                         }
@@ -98,11 +107,21 @@ struct SearchView: View {
                 commitRecentSearch(from: appState.searchQuery)
                 scheduleSearch(for: appState.searchQuery, immediately: true)
             }
-            .onChange(of: appState.searchQuery) { _, newValue in
+            .onChange(of: appState.searchQuery) { oldValue, newValue in
                 let shouldSearchImmediately = normalized(newValue) == normalized(immediateSearchQuery ?? "")
+                if normalized(oldValue) != normalized(newValue) {
+                    visibleSongCount = 10
+                }
                 scheduleSearch(for: newValue, immediately: shouldSearchImmediately)
                 if shouldSearchImmediately {
                     immediateSearchQuery = nil
+                }
+            }
+            .onChange(of: appState.searchResults.songs.count) { _, newCount in
+                if newCount < visibleSongCount {
+                    visibleSongCount = max(10, newCount)
+                } else {
+                    visibleSongCount = min(max(visibleSongCount, 10), newCount)
                 }
             }
             .onDisappear {
@@ -282,6 +301,18 @@ struct SearchView: View {
         appState.play(track: track, queue: suggestedTracks)
     }
 
+    private func handleSongAppearance(index: Int, displayedCount: Int) {
+        guard index >= displayedCount - 2 else { return }
+
+        if visibleSongCount < appState.searchResults.songs.count {
+            visibleSongCount = min(visibleSongCount + 8, appState.searchResults.songs.count)
+        } else if appState.canLoadMoreSearchResults {
+            Task {
+                await appState.loadMoreSearchResultsIfNeeded()
+            }
+        }
+    }
+
     private func selectSuggestion(_ query: String) {
         immediateSearchQuery = query
         appState.searchQuery = query
@@ -320,6 +351,7 @@ struct SearchView: View {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedQuery.isEmpty == false else {
             appState.clearSearch()
+            visibleSongCount = 10
             return
         }
 

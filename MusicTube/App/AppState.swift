@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     @Published private(set) var relatedTracks: [Track] = []
     @Published private(set) var isLoadingRelatedTracks = false
     @Published private(set) var isLoadingMoreRecommendations = false
+    @Published private(set) var isLoadingMoreSearchResults = false
     @Published var isPlaylistPickerPresented = false
     @Published private(set) var playlistPickerTrack: Track?
     @Published private(set) var playlistPickerTargetPlaylist: Playlist?
@@ -55,11 +56,13 @@ final class AppState: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var isRefreshingDashboard = false
     private var activeSearchRequestID: UUID?
+    private var lastLikedSongsAccountSyncDate: Date?
     private let localLikedPlaylistID = "local-liked-songs"
     private let localSavedSongsPlaylistID = "local-saved-songs"
     private let localReplayMixPlaylistID = "local-replay-mix"
     private let localFavoritesMixPlaylistID = "local-favorites-mix"
     private let deviceProfileID = "device-local-profile"
+    private let likedSongsAccountSyncCooldown: TimeInterval = 300
 
     init(
         authService: AuthProviding,
@@ -134,6 +137,10 @@ final class AppState: ObservableObject {
 
     var isYouTubeConnected: Bool {
         session != nil
+    }
+
+    var canLoadMoreSearchResults: Bool {
+        searchResults.nextSongsContinuationToken?.isEmpty == false
     }
 
     var likedSongsPlaylist: Playlist? {
@@ -231,9 +238,9 @@ final class AppState: ObservableObject {
         isRefreshingDashboard = true
         defer { isRefreshingDashboard = false }
 
-        async let libraryFetch: Void = refreshLibrary()
-        async let homeFetch: Void = refreshHome()
-        _ = await (libraryFetch, homeFetch)
+        // Load the library first so likes sync has priority and isn't competing with home hydration.
+        await refreshLibrary()
+        await refreshHome()
     }
 
     func refreshHome() async {
@@ -254,13 +261,15 @@ final class AppState: ObservableObject {
                     limit: 24,
                     excluding: Set((home.featured + home.recent).map(trackIdentifier))
                 )
-                let mergedFeatured = deduplicatedTracks(
-                    home.featured + learnedTracks + home.recent
+                let mergedFeatured = curatedSuggestionTracks(
+                    deduplicatedTracks(home.featured + learnedTracks + home.recent)
                 )
                 let featured = Array(mergedFeatured.prefix(60))
                 let featuredIDs = Set(featured.map(trackIdentifier))
                 let recent = Array(
-                    deduplicatedTracks(home.recent + learnedTracks.shuffled() + home.featured.shuffled())
+                    curatedSuggestionTracks(
+                        deduplicatedTracks(home.recent + learnedTracks.shuffled() + home.featured.shuffled())
+                    )
                         .filter { featuredIDs.contains(trackIdentifier($0)) == false }
                         .prefix(40)
                 )
@@ -277,8 +286,7 @@ final class AppState: ObservableObject {
                 }
 
                 Task {
-                    try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    self.playbackService.prefetchStreams(for: Array(featured.prefix(6)))
+                    self.playbackService.prefetchStreams(for: Array(featured.prefix(10)))
                 }
                 return
             } catch {
@@ -330,7 +338,7 @@ final class AppState: ObservableObject {
         }
         guard moreTracks.isEmpty == false else { return }
 
-        featuredTracks = deduplicatedTracks(featuredTracks + moreTracks)
+        featuredTracks = curatedSuggestionTracks(deduplicatedTracks(featuredTracks + moreTracks))
         AppContainer.shared.carPlayManager?.refresh(using: self)
     }
 
@@ -349,6 +357,7 @@ final class AppState: ObservableObject {
         let requestID = UUID()
         activeSearchRequestID = requestID
         isSearching = true
+        isLoadingMoreSearchResults = false
 
         do {
             let results = try await catalogService.search(query: trimmed, accessToken: session?.accessToken)
@@ -369,7 +378,41 @@ final class AppState: ObservableObject {
     func clearSearch() {
         activeSearchRequestID = nil
         isSearching = false
+        isLoadingMoreSearchResults = false
         searchResults = .empty
+    }
+
+    func loadMoreSearchResultsIfNeeded() async {
+        guard isLoadingMoreSearchResults == false else { return }
+        guard isSearching == false else { return }
+        guard let continuation = searchResults.nextSongsContinuationToken, continuation.isEmpty == false else { return }
+
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.isEmpty == false else { return }
+
+        let requestID = activeSearchRequestID
+        isLoadingMoreSearchResults = true
+        defer { isLoadingMoreSearchResults = false }
+
+        do {
+            let moreResults = try await catalogService.loadMoreSearchResults(
+                query: trimmedQuery,
+                continuation: continuation,
+                accessToken: session?.accessToken
+            )
+            guard activeSearchRequestID == requestID else { return }
+
+            searchResults = SearchResponse(
+                songs: deduplicatedTracks(searchResults.songs + moreResults.songs),
+                playlists: searchResults.playlists,
+                albums: searchResults.albums,
+                artists: searchResults.artists,
+                nextSongsContinuationToken: moreResults.nextSongsContinuationToken
+            )
+        } catch {
+            guard activeSearchRequestID == requestID else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     func recordRecentSearch(_ query: String) {
@@ -442,13 +485,16 @@ final class AppState: ObservableObject {
             }
         }
 
-        return suggestions
+        return curatedSuggestionTracks(suggestions)
     }
 
     func play(track: Track, queue: [Track]? = nil) {
-        recordLocalPlayback(for: track)
         playbackService.play(track: track, queue: queue)
         AppContainer.shared.carPlayManager?.refresh(using: self)
+
+        Task { @MainActor [weak self] in
+            self?.recordLocalPlayback(for: track)
+        }
     }
 
     func playNextTrack() {
@@ -475,6 +521,7 @@ final class AppState: ObservableObject {
                 let loadedPlaylists = try await catalogService.loadPlaylists(accessToken: accessToken)
                 playlists = mergedLibraryPlaylists(remotePlaylists: loadedPlaylists)
                 await hydrateLikedSongsPlaylistIfNeeded(forceRefresh: true)
+                lastLikedSongsAccountSyncDate = Date()
                 trimCachesToValidCollections()
                 libraryStatusMessage = libraryStatusMessageText(for: playlists, savedCollections: savedCollections)
                 AppContainer.shared.carPlayManager?.refresh(using: self)
@@ -493,7 +540,11 @@ final class AppState: ObservableObject {
         AppContainer.shared.carPlayManager?.refresh(using: self)
     }
 
-    func loadPlaylistItems(for playlist: Playlist, forceRefresh: Bool = false) async -> [Track] {
+    func loadPlaylistItems(
+        for playlist: Playlist,
+        forceRefresh: Bool = false,
+        surfaceErrors: Bool = true
+    ) async -> [Track] {
         if isSyntheticMixID(playlist.id) || isLocalCollectionID(playlist.id) {
             if forceRefresh == false, let cached = playlistCache[playlist.id] {
                 return cached
@@ -521,20 +572,31 @@ final class AppState: ObservableObject {
                 accessToken: accessToken
             )
             playlistCache[playlist.id] = tracks
-            errorMessage = nil
+            if surfaceErrors {
+                errorMessage = nil
+            }
             return tracks
         } catch {
-            errorMessage = error.localizedDescription
+            if surfaceErrors || shouldSuppressBackgroundCatalogError(error) == false {
+                errorMessage = error.localizedDescription
+            }
             if playlist.kind == .likedMusic, localLikedTracks.isEmpty == false {
                 let fallbackTracks = deduplicatedTracks(localLikedTracks)
                 playlistCache[playlist.id] = fallbackTracks
                 return fallbackTracks
             }
+            if let cached = playlistCache[playlist.id], cached.isEmpty == false {
+                return cached
+            }
             return []
         }
     }
 
-    func loadCollectionItems(for collection: MusicCollection, forceRefresh: Bool = false) async -> [Track] {
+    func loadCollectionItems(
+        for collection: MusicCollection,
+        forceRefresh: Bool = false,
+        surfaceErrors: Bool = true
+    ) async -> [Track] {
         if forceRefresh == false, let cached = collectionCache[collection.id] {
             return cached
         }
@@ -545,10 +607,17 @@ final class AppState: ObservableObject {
                 accessToken: session?.accessToken
             )
             collectionCache[collection.id] = tracks
-            errorMessage = nil
+            if surfaceErrors {
+                errorMessage = nil
+            }
             return tracks
         } catch {
-            errorMessage = error.localizedDescription
+            if surfaceErrors || shouldSuppressBackgroundCatalogError(error) == false {
+                errorMessage = error.localizedDescription
+            }
+            if let cached = collectionCache[collection.id], cached.isEmpty == false {
+                return cached
+            }
             return []
         }
     }
@@ -688,12 +757,15 @@ final class AppState: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let originalLikeState = self.isTrackLiked(track)
+            self.applyLocalLikeState(shouldLike, for: track)
 
             do {
                 try await self.catalogService.setLikeStatus(for: track, isLiked: shouldLike, accessToken: accessToken)
-                self.applyLocalLikeState(shouldLike, for: track)
+                self.lastLikedSongsAccountSyncDate = Date()
                 self.errorMessage = nil
             } catch {
+                self.applyLocalLikeState(originalLikeState, for: track)
                 self.errorMessage = error.localizedDescription
             }
         }
@@ -836,6 +908,12 @@ final class AppState: ObservableObject {
             return
         }
 
+        if let lastLikedSongsAccountSyncDate,
+           Date().timeIntervalSince(lastLikedSongsAccountSyncDate) < likedSongsAccountSyncCooldown {
+            return
+        }
+
+        lastLikedSongsAccountSyncDate = Date()
         await hydrateLikedSongsPlaylistIfNeeded(forceRefresh: true)
     }
 
@@ -912,6 +990,7 @@ final class AppState: ObservableObject {
         sleepTimerEndDate = nil
         playlistPickerTrack = nil
         isPlaylistPickerPresented = false
+        lastLikedSongsAccountSyncDate = nil
     }
 
     private func clearRemoteState() {
@@ -923,6 +1002,7 @@ final class AppState: ObservableObject {
         collectionCache.removeAll()
         hasLoadedHome = false
         hasLoadedLibrary = false
+        lastLikedSongsAccountSyncDate = nil
     }
 
     private func buildHomeFromLoadedLibrary() async -> Bool {
@@ -933,7 +1013,7 @@ final class AppState: ObservableObject {
 
         async let likedTracksFetch: [Track] = {
             if let likedPlaylist {
-                return await self.loadPlaylistItems(for: likedPlaylist)
+                return await self.loadPlaylistItems(for: likedPlaylist, surfaceErrors: false)
             }
             return []
         }()
@@ -946,7 +1026,7 @@ final class AppState: ObservableObject {
 
         let mixTracks = await withTaskGroup(of: [Track].self) { group in
             for playlist in candidateMixes.prefix(6) {
-                group.addTask { await self.loadPlaylistItems(for: playlist) }
+                group.addTask { await self.loadPlaylistItems(for: playlist, surfaceErrors: false) }
             }
 
             var tracks: [Track] = []
@@ -956,20 +1036,25 @@ final class AppState: ObservableObject {
             return tracks
         }
 
-        let likedTracks = await likedTracksFetch
-        let savedTracks = await savedTracksFetch
+        let likedTracks = curatedSuggestionTracks(await likedTracksFetch)
+        let savedTracks = curatedSuggestionTracks(await savedTracksFetch)
+        let topTracks = curatedSuggestionTracks(snapshot.topTracks)
+        let recentProfileTracks = curatedSuggestionTracks(snapshot.recentTracks)
+        let curatedMixTracks = curatedSuggestionTracks(mixTracks)
         let learnedTracks = await smartRecommendations(
             limit: 30,
-            excluding: Set((likedTracks + savedTracks + mixTracks).map(trackIdentifier))
+            excluding: Set((likedTracks + savedTracks + curatedMixTracks).map(trackIdentifier))
         )
 
-        let featuredPool = deduplicatedTracks(
+        let featuredPool = curatedSuggestionTracks(
+            deduplicatedTracks(
             learnedTracks +
             savedTracks.shuffled() +
             likedTracks.shuffled() +
-            snapshot.topTracks.shuffled() +
-            mixTracks.shuffled() +
-            snapshot.recentTracks.shuffled()
+            topTracks.shuffled() +
+            curatedMixTracks.shuffled() +
+            recentProfileTracks.shuffled()
+            )
         )
 
         guard featuredPool.isEmpty == false else { return false }
@@ -977,7 +1062,9 @@ final class AppState: ObservableObject {
         let featured = Array(featuredPool.prefix(50))
         let featuredIDs = Set(featured.map(trackIdentifier))
         let recent = Array(
-            deduplicatedTracks(snapshot.recentTracks + mixTracks.shuffled() + learnedTracks.shuffled())
+            curatedSuggestionTracks(
+                deduplicatedTracks(recentProfileTracks + curatedMixTracks.shuffled() + learnedTracks.shuffled())
+            )
                 .filter { featuredIDs.contains(trackIdentifier($0)) == false }
                 .prefix(30)
         )
@@ -992,8 +1079,9 @@ final class AppState: ObservableObject {
         let starterTracks = await starterRecommendations(limit: 40, excluding: [])
         guard starterTracks.isEmpty == false else { return false }
 
-        featuredTracks = Array(starterTracks.prefix(40))
-        recentTracks = Array(starterTracks.dropFirst(16).prefix(24))
+        let curatedTracks = curatedSuggestionTracks(starterTracks)
+        featuredTracks = Array(curatedTracks.prefix(40))
+        recentTracks = Array(curatedTracks.dropFirst(16).prefix(24))
         suggestedMixes = []
         playlistCache = playlistCache.filter { isSyntheticMixID($0.key) == false }
         return true
@@ -1068,7 +1156,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        return collected
+        return curatedSuggestionTracks(collected)
     }
 
     private func smartRecommendations(
@@ -1077,19 +1165,27 @@ final class AppState: ObservableObject {
         focusedTrack: Track? = nil
     ) async -> [Track] {
         let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
+        let savedSeedTracks = curatedSuggestionTracks(snapshot.savedTracks)
+        let likedSeedTracks = curatedSuggestionTracks(snapshot.likedTracks)
+        let topArtists = orderedUniqueQueries(
+            snapshot.topArtists +
+            savedSeedTracks.map(\.artist) +
+            likedSeedTracks.map(\.artist) +
+            savedArtistCollections.map(\.title)
+        )
         var queries: [String] = []
 
-        if let focusedTrack {
+        if let focusedTrack, focusedTrack.isEligibleForMusicSuggestions {
             queries.append("\(focusedTrack.artist) \(focusedTrack.title)")
             queries.append("\(focusedTrack.artist) official audio")
             queries.append("\(focusedTrack.artist) songs")
             queries.append("\(focusedTrack.title) official audio")
         }
 
-        queries.append(contentsOf: snapshot.topArtists.prefix(4).map { "\($0) official audio" })
+        queries.append(contentsOf: topArtists.prefix(4).map { "\($0) official audio" })
         queries.append(contentsOf: recentSearches.prefix(3))
-        queries.append(contentsOf: snapshot.savedTracks.prefix(3).map { "\($0.artist) \($0.title)" })
-        queries.append(contentsOf: snapshot.likedTracks.prefix(3).map { "\($0.artist) songs" })
+        queries.append(contentsOf: savedSeedTracks.prefix(3).map { "\($0.artist) \($0.title)" })
+        queries.append(contentsOf: likedSeedTracks.prefix(3).map { "\($0.artist) songs" })
         queries.append(contentsOf: savedArtistCollections.prefix(3).map { "\($0.title) songs" })
 
         let normalizedQueries = orderedUniqueQueries(queries)
@@ -1098,12 +1194,7 @@ final class AppState: ObservableObject {
         }
 
         let preferredArtists = Set(
-            orderedUniqueQueries(
-                snapshot.topArtists +
-                snapshot.savedTracks.map(\.artist) +
-                snapshot.likedTracks.map(\.artist) +
-                savedArtistCollections.map(\.title)
-            )
+            topArtists
             .prefix(8)
             .map(normalizedRecommendationText)
         )
@@ -1125,7 +1216,7 @@ final class AppState: ObservableObject {
             return buckets
         }
 
-        let rankedTracks = deduplicatedTracks(resultBuckets.flatMap { $0 }).sorted {
+        let rankedTracks = curatedSuggestionTracks(deduplicatedTracks(resultBuckets.flatMap { $0 })).sorted {
             recommendationScore(for: $0, focusedTrack: focusedTrack, preferredArtists: preferredArtists) >
             recommendationScore(for: $1, focusedTrack: focusedTrack, preferredArtists: preferredArtists)
         }
@@ -1153,6 +1244,35 @@ final class AppState: ObservableObject {
             let identifier = trackIdentifier(track)
             return seenTrackIDs.insert(identifier).inserted
         }
+    }
+
+    private func curatedSuggestionTracks(_ tracks: [Track]) -> [Track] {
+        let withoutShorts = tracks.filter { $0.isLikelyShortFormVideo == false }
+        let curated = withoutShorts.filter(\.isEligibleForMusicSuggestions)
+        if curated.isEmpty == false {
+            return curated
+        }
+        return withoutShorts
+    }
+
+    private func isQuotaOrTransientCatalogError(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("quota")
+            || message.contains("daily limit")
+            || message.contains("rate limit")
+            || message.contains("temporarily unavailable")
+            || message.contains("backend error")
+            || message.contains("timed out")
+            || message.contains("network connection was lost")
+            || message.contains("offline")
+            || message.contains("returned status 429")
+            || message.contains("returned status 500")
+            || message.contains("returned status 502")
+            || message.contains("returned status 503")
+    }
+
+    private func shouldSuppressBackgroundCatalogError(_ error: Error) -> Bool {
+        isAuthorizationError(error) || isQuotaOrTransientCatalogError(error)
     }
 
     private func prioritizeLibraryPlaylists(_ playlists: [Playlist]) -> [Playlist] {
@@ -1305,7 +1425,9 @@ final class AppState: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.homeStatusMessage != nil || self.featuredTracks.isEmpty {
+            // Avoid rebuilding Home on every play; that causes visible list "reload" jitter.
+            // Rehydrate only when recommendations are genuinely empty.
+            if self.featuredTracks.isEmpty {
                 _ = await self.buildHomeFromLoadedLibrary()
                 AppContainer.shared.carPlayManager?.refresh(using: self)
             }
@@ -1427,16 +1549,32 @@ final class AppState: ObservableObject {
             return
         }
 
-        let tracks = await loadPlaylistItems(for: likedPlaylist, forceRefresh: forceRefresh)
-        likedTrackIDs = Set(tracks.map(trackIdentifier))
+        let tracks = await loadPlaylistItems(
+            for: likedPlaylist,
+            forceRefresh: forceRefresh,
+            surfaceErrors: false
+        )
+        var resolvedTracks = tracks
+
+        if isLocalCollectionID(likedPlaylist.id) == false {
+            let mergedSnapshot = localMusicProfileStore.mergeLikedTracks(tracks, profileID: currentProfileID)
+            resolvedTracks = mergedSnapshot.likedTracks
+            if resolvedTracks.isEmpty {
+                playlistCache.removeValue(forKey: likedPlaylist.id)
+            } else {
+                playlistCache[likedPlaylist.id] = resolvedTracks
+            }
+        }
+
+        likedTrackIDs = Set(resolvedTracks.map(trackIdentifier))
 
         if let playlistIndex = playlists.firstIndex(where: { $0.id == likedPlaylist.id }) {
             playlists[playlistIndex] = Playlist(
                 id: likedPlaylist.id,
                 title: likedPlaylist.title,
                 description: likedPlaylist.description,
-                artworkURL: tracks.first?.artworkURL ?? likedPlaylist.artworkURL,
-                itemCount: tracks.count,
+                artworkURL: resolvedTracks.first?.artworkURL ?? likedPlaylist.artworkURL,
+                itemCount: resolvedTracks.count,
                 kind: likedPlaylist.kind
             )
         }
@@ -1448,14 +1586,14 @@ final class AppState: ObservableObject {
         let likedPlaylistSnapshot = likedSongsPlaylist
         async let likedFetch: [Track] = {
             if let playlist = likedPlaylistSnapshot {
-                return await self.loadPlaylistItems(for: playlist)
+                return await self.loadPlaylistItems(for: playlist, surfaceErrors: false)
             }
             return []
         }()
 
         let playlistFetches: [[Track]] = await withTaskGroup(of: [Track].self) { group in
             for playlist in sourcePlaylists {
-                group.addTask { await self.loadPlaylistItems(for: playlist) }
+                group.addTask { await self.loadPlaylistItems(for: playlist, surfaceErrors: false) }
             }
 
             var results: [[Track]] = []
@@ -1465,18 +1603,18 @@ final class AppState: ObservableObject {
             return results
         }
 
-        let likedTracks = await likedFetch
+        let likedTracks = curatedSuggestionTracks(await likedFetch)
 
         var sourcePools: [[Track]] = []
         if featuredTracks.isEmpty == false || recentTracks.isEmpty == false {
-            sourcePools.append(deduplicatedTracks(featuredTracks.shuffled() + recentTracks.shuffled()))
+            sourcePools.append(curatedSuggestionTracks(deduplicatedTracks(featuredTracks.shuffled() + recentTracks.shuffled())))
         }
         if likedTracks.isEmpty == false {
-            sourcePools.append(deduplicatedTracks(likedTracks.shuffled() + featuredTracks.shuffled()))
+            sourcePools.append(curatedSuggestionTracks(deduplicatedTracks(likedTracks.shuffled() + featuredTracks.shuffled())))
         }
 
         for tracks in playlistFetches where tracks.isEmpty == false {
-            sourcePools.append(deduplicatedTracks(tracks.shuffled() + recentTracks.shuffled()))
+            sourcePools.append(curatedSuggestionTracks(deduplicatedTracks(tracks.shuffled() + recentTracks.shuffled())))
         }
 
         let mixTitles = [
@@ -1489,7 +1627,7 @@ final class AppState: ObservableObject {
         ]
 
         let mixes = Array(sourcePools.prefix(mixTitles.count).enumerated()).compactMap { index, pool -> Playlist? in
-            let tracks = Array(deduplicatedTracks(pool).prefix(32))
+            let tracks = Array(curatedSuggestionTracks(deduplicatedTracks(pool)).prefix(32))
             guard tracks.isEmpty == false else { return nil }
 
             let mixID = "suggested-mix-\(index + 1)"

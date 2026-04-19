@@ -43,7 +43,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private var interruptionObserver: NSObjectProtocol?
     private var streamCandidateCache: [String: [URL]] = [:]
     private var authoritativeDurationCache: [String: TimeInterval] = [:]
-    private var prefetchTasks: [String: Task<Void, Never>] = [:]
+    private var prefetchTasks: [String: Task<[URL], Never>] = [:]
     private let commandCenter = MPRemoteCommandCenter.shared()
     private let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
     private let artworkCache = NSCache<NSURL, UIImage>()
@@ -151,17 +151,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     func prefetchStreams(for tracks: [Track]) {
         let candidates = tracks
             .filter { $0.youtubeVideoID != nil && $0.streamURL == nil }
-            .prefix(6)                      // warm top 6 to keep memory reasonable
+            .prefix(10)
 
         for track in candidates {
-            let key = cacheKey(for: track)
-            guard streamCandidateCache[key] == nil, prefetchTasks[key] == nil else { continue }
-
-            prefetchTasks[key] = Task { [weak self, track] in
-                guard let self else { return }
-                defer { Task { @MainActor in self.prefetchTasks.removeValue(forKey: key) } }
-                _ = try? await self.resolveAndCacheStreamCandidates(for: track)
-            }
+            enqueueStreamResolutionTaskIfNeeded(for: track, priority: .userInitiated)
         }
     }
 
@@ -504,11 +497,12 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         let playerItem = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: playerItem)
-        player.automaticallyWaitsToMinimizeStalling = true
+        player.automaticallyWaitsToMinimizeStalling = false
         player.allowsExternalPlayback = true
         player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
-        // Larger buffer = fewer mid-song re-requests to YouTube CDN
-        playerItem.preferredForwardBufferDuration = 120
+        // Keep startup snappy, then rely on stall recovery if the CDN hiccups later.
+        playerItem.preferredForwardBufferDuration = 3
+        playerItem.preferredPeakBitRate = 256_000
         playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         self.player = player
         registerItemDidEndObserver(for: playerItem)
@@ -565,7 +559,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         }
 
         updateNowPlayingInfo(for: track)
-        player.play()
+        player.playImmediately(atRate: 1.0)
         setIsPlaying(true)
         updatePlaybackState()
 
@@ -1110,10 +1104,23 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             streamCandidateCache.removeValue(forKey: key)
         }
 
+        if let prefetchTask = prefetchTasks[key] ?? enqueueStreamResolutionTaskIfNeeded(for: track, priority: .userInitiated) {
+            let prefetchedCandidates = await prefetchTask.value
+            let stillValidPrefetch = prefetchedCandidates.filter { !isStreamURLExpired($0) }
+            if stillValidPrefetch.isEmpty == false {
+                streamCandidateCache[key] = stillValidPrefetch
+                return stillValidPrefetch
+            }
+        }
+
+        return try await resolveFreshStreamCandidates(for: track)
+    }
+
+    private func resolveFreshStreamCandidates(for track: Track) async throws -> [URL] {
         let candidates = try await extractPlayableStreamCandidates(for: track)
         let deduplicated = deduplicatedURLs(candidates)
         if deduplicated.isEmpty == false {
-            streamCandidateCache[key] = deduplicated
+            streamCandidateCache[cacheKey(for: track)] = deduplicated
         }
         return deduplicated
     }
@@ -1132,24 +1139,44 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         return Date().timeIntervalSince1970 > expireTimestamp - 300
     }
 
+    @discardableResult
+    private func enqueueStreamResolutionTaskIfNeeded(
+        for track: Track,
+        priority: TaskPriority
+    ) -> Task<[URL], Never>? {
+        let key = cacheKey(for: track)
+
+        if let cached = streamCandidateCache[key], cached.contains(where: { !isStreamURLExpired($0) }) {
+            return nil
+        }
+
+        if let existingTask = prefetchTasks[key] {
+            return existingTask
+        }
+
+        guard track.youtubeVideoID != nil || track.streamURL != nil else { return nil }
+
+        let task: Task<[URL], Never> = Task(priority: priority) { [weak self, track] in
+            guard let self else { return [] }
+            defer { Task { @MainActor in self.prefetchTasks.removeValue(forKey: key) } }
+
+            let candidates = (try? await self.resolveFreshStreamCandidates(for: track)) ?? []
+            return candidates.filter { !self.isStreamURLExpired($0) }
+        }
+
+        prefetchTasks[key] = task
+        return task
+    }
+
     private func prewarmQueue(around track: Track) {
         guard playbackQueue.isEmpty == false else { return }
 
         let targetTracks = playbackQueue
             .filter { matches($0, track) == false }
-            .prefix(3)
+            .prefix(5)
 
         for pendingTrack in targetTracks {
-            guard pendingTrack.youtubeVideoID != nil else { continue }
-
-            let key = cacheKey(for: pendingTrack)
-            guard streamCandidateCache[key] == nil, prefetchTasks[key] == nil else { continue }
-
-            prefetchTasks[key] = Task { [weak self, pendingTrack] in
-                guard let self else { return }
-                defer { self.prefetchTasks.removeValue(forKey: key) }
-                _ = try? await self.resolveAndCacheStreamCandidates(for: pendingTrack)
-            }
+            enqueueStreamResolutionTaskIfNeeded(for: pendingTrack, priority: .userInitiated)
         }
     }
 
@@ -1162,7 +1189,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             throw PlaybackError.missingSource
         }
 
-        let youtube = YouTube(videoID: videoID, methods: [.remote, .local])
+        let youtube = YouTube(videoID: videoID, methods: [.local, .remote])
         let streams: [Stream]
         do {
             streams = try await youtube.streams
@@ -1267,6 +1294,19 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         if stream.audioCodec == .mp4a {
             score += 35
+        }
+
+        if let audioBitrate = stream.itag.audioBitrate {
+            switch audioBitrate {
+            case 96...192:
+                score += 18
+            case 193...256:
+                score += 8
+            case let bitrate where bitrate > 256:
+                score -= 8
+            default:
+                break
+            }
         }
 
         if stream.videoCodec == .avc1 {

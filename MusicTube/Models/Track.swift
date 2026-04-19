@@ -125,12 +125,14 @@ struct SearchResponse: Hashable, Sendable {
     var playlists: [MusicCollection]
     var albums: [MusicCollection]
     var artists: [MusicCollection]
+    var nextSongsContinuationToken: String?
 
     static let empty = SearchResponse(
         songs: [],
         playlists: [],
         albums: [],
-        artists: []
+        artists: [],
+        nextSongsContinuationToken: nil
     )
 
     var isEmpty: Bool {
@@ -139,6 +141,44 @@ struct SearchResponse: Hashable, Sendable {
 
     var totalResultCount: Int {
         songs.count + playlists.count + albums.count + artists.count
+    }
+}
+
+extension Track {
+    var isLikelyShortFormVideo: Bool {
+        let searchText = normalizedMusicClassificationText
+        if searchText.contains("shorts") || searchText.contains("#shorts") {
+            return true
+        }
+
+        guard let duration else { return false }
+        return duration > 0 && duration < 60
+    }
+
+    var isClearlyNonMusicContent: Bool {
+        let searchText = normalizedMusicClassificationText
+
+        let negativeKeywords = [
+            "news", "breaking", "podcast", "interview", "episode", "sermon",
+            "preaching", "speech", "lecture", "reaction", "review", "tutorial",
+            "walkthrough", "gameplay", "vlog", "unboxing", "livestream",
+            "trailer", "trending", "channel intro", "behind the scenes",
+            "اخبار", "الأخبار", "عاجل", "نشرة", "برنامج", "حلقة",
+            "مباشر", "لقاء", "مقابلة", "الفضائية", "فضائية", "قناة",
+            "تعلن", "شركة", "تخفيض", "نفط", "طيران"
+        ]
+
+        return negativeKeywords.contains { searchText.contains($0) }
+    }
+
+    var isEligibleForMusicSuggestions: Bool {
+        !isLikelyShortFormVideo && !isClearlyNonMusicContent
+    }
+
+    private var normalizedMusicClassificationText: String {
+        "\(title) \(artist)"
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
     }
 }
 

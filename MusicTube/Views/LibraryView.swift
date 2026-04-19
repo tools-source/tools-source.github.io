@@ -14,7 +14,6 @@ struct LibraryView: View {
                     savedSongsSection
                     customPlaylistsSection
                     savedCollectionsSection
-                    playlistsSection
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
@@ -34,12 +33,6 @@ struct LibraryView: View {
             .task {
                 if appState.hasLoadedLibrary == false, appState.isLoadingPlaylists == false {
                     await appState.refreshLibrary()
-                }
-            }
-            .onAppear {
-                guard appState.hasLoadedLibrary, appState.isLoadingPlaylists == false else { return }
-                Task {
-                    await appState.refreshLikedSongsPlaylistFromAccount()
                 }
             }
             .background(libraryBackground.ignoresSafeArea())
@@ -244,28 +237,6 @@ struct LibraryView: View {
                     ForEach(appState.savedCollections) { collection in
                         NavigationLink(value: collection) {
                             SavedCollectionRow(collection: collection)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
-
-    private var playlistsSection: some View {
-        librarySection("Mixes & Synced Playlists") {
-            let remoteCollections = appState.libraryPlaylists.filter { $0.kind != .custom }
-            if remoteCollections.isEmpty {
-                Text("As you listen more, MusicTube will keep building mixes and recommendations here.")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.white.opacity(0.65))
-            } else {
-                VStack(spacing: 12) {
-                    ForEach(remoteCollections) { playlist in
-                        NavigationLink(value: playlist) {
-                            PlaylistRow(playlist: playlist) {
-                                appState.downloadPlaylist(playlist)
-                            }
                         }
                         .buttonStyle(.plain)
                     }
