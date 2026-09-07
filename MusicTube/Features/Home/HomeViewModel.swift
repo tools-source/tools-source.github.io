@@ -12,7 +12,10 @@ final class HomeViewModel: ObservableObject {
 
     private let appState: AppState
     private let playback: PlaybackService
-    private var visibleRecommendationCount = 10
+    private var visibleRecommendationCount = 12
+    private var recordedRecommendationSignatures: Set<String> = []
+    private var pendingRecommendationImpressions: [String: Track] = [:]
+    private var recommendationImpressionTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
 
     init(appState: AppState) {
@@ -31,6 +34,8 @@ final class HomeViewModel: ObservableObject {
 
     func refresh() async {
         await appState.refreshDashboard(forceRefresh: true)
+        visibleRecommendationCount = 12
+        rebuildSnapshot()
     }
 
     func play(_ track: Track, queue: [Track]) {
@@ -49,6 +54,30 @@ final class HomeViewModel: ObservableObject {
         appState.togglePlayback()
     }
 
+    func playFreshMix() {
+        let queue = recommendationQueue
+        guard let first = queue.first else { return }
+        play(first, queue: queue)
+    }
+
+    func surpriseMe() {
+        let queue = recommendationQueue.shuffled()
+        guard let first = queue.first else { return }
+        play(first, queue: queue)
+    }
+
+    func openSearch() {
+        appState.selectedMainTab = .search
+    }
+
+    func openLibrary() {
+        appState.selectedMainTab = .library
+    }
+
+    func openDownloads() {
+        appState.selectedMainTab = .downloads
+    }
+
     func recommendMoreLike(_ track: Track) {
         appState.recommendMoreLike(track)
     }
@@ -58,7 +87,8 @@ final class HomeViewModel: ObservableObject {
     }
 
     func recommendationAppeared(_ item: IndexedTrackPresentation) {
-        guard item.index >= snapshot.madeForYou.count - 2 else { return }
+        recordRecommendationImpressionIfNeeded(item.track)
+        guard item.index >= visibleRecommendationCount - 2 else { return }
         if visibleRecommendationCount < appState.featuredTracks.count {
             visibleRecommendationCount = min(
                 visibleRecommendationCount + AppConfig.Search.visibleSongPageSize,
@@ -72,6 +102,34 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    func spotlightAppeared() {
+        guard let track = snapshot.spotlightTrack else { return }
+        recordRecommendationImpressionIfNeeded(track)
+    }
+
+    private func recordRecommendationImpressionIfNeeded(_ track: Track) {
+        let signature = RecommendationTrackIdentity.contentSignature(for: track)
+        guard recordedRecommendationSignatures.insert(signature).inserted else { return }
+        pendingRecommendationImpressions[signature] = track
+        guard recommendationImpressionTask == nil else { return }
+        recommendationImpressionTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 180_000_000)
+            } catch {
+                return
+            }
+            self?.flushRecommendationImpressions()
+        }
+    }
+
+    private func flushRecommendationImpressions() {
+        recommendationImpressionTask = nil
+        let tracks = Array(pendingRecommendationImpressions.values)
+        pendingRecommendationImpressions.removeAll(keepingCapacity: true)
+        guard tracks.isEmpty == false else { return }
+        appState.recordRecommendationImpressions(tracks)
+    }
+
     private func rebuildSnapshot() {
         let playbackState = playback.liveState
         let currentQueue = playback.currentQueue
@@ -82,15 +140,19 @@ final class HomeViewModel: ObservableObject {
             continueListening = Array(appState.historyTracks.prefix(12))
         }
 
-        let recommendations = Array(appState.featuredTracks.prefix(visibleRecommendationCount))
+        let visibleRecommendations = Array(appState.featuredTracks.prefix(visibleRecommendationCount))
+        let spotlightTrack = visibleRecommendations.first
+        let recommendations = visibleRecommendations
+            .dropFirst()
             .enumerated()
-            .map { IndexedTrackPresentation(index: $0.offset, track: $0.element) }
+            .map { IndexedTrackPresentation(index: $0.offset + 1, track: $0.element) }
         let recommendationIDs = Set(recommendations.map { $0.track.playbackKey })
         let contextual = appState.relatedTracks.isEmpty
             ? appState.recentTracks.filter { recommendationIDs.contains($0.playbackKey) == false }
             : appState.relatedTracks
 
         let nextSnapshot = HomeSnapshot(
+            spotlightTrack: spotlightTrack,
             continueListening: continueListening,
             madeForYou: recommendations,
             recentlyPlayed: Array(appState.historyTracks.prefix(12)),
@@ -98,6 +160,7 @@ final class HomeViewModel: ObservableObject {
             contextualTracks: Array(contextual.prefix(8)),
             statusMessage: appState.homeStatusMessage,
             recommendationBlurb: appState.recommendationBlurb,
+            recommendationGenerationID: appState.homeContent.recommendationGenerationID,
             nowPlayingKey: playbackState.nowPlaying?.playbackKey,
             isPlaying: playbackState.isPlaying,
             isLoading: appState.isLoading || appState.isLoadingMoreRecommendations,
@@ -105,7 +168,18 @@ final class HomeViewModel: ObservableObject {
             displayName: appState.user?.name.components(separatedBy: " ").first
         )
         guard nextSnapshot != snapshot else { return }
+        if nextSnapshot.recommendationGenerationID != snapshot.recommendationGenerationID {
+            recommendationImpressionTask?.cancel()
+            recommendationImpressionTask = nil
+            recordedRecommendationSignatures.removeAll(keepingCapacity: true)
+            pendingRecommendationImpressions.removeAll(keepingCapacity: true)
+        }
         snapshot = nextSnapshot
+    }
+
+    private var recommendationQueue: [Track] {
+        let tracks = [snapshot.spotlightTrack].compactMap { $0 } + snapshot.madeForYou.map(\.track)
+        return tracks.isEmpty ? snapshot.continueListening : tracks
     }
 
     // Every subscription here rebuilds the snapshot by re-reading `AppState` /

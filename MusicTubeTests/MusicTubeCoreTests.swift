@@ -132,6 +132,79 @@ final class MusicTubeCoreTests: XCTestCase {
         )
     }
 
+    func testProgressiveStartupFallbackDoesNotWaitTheFullWatchdog() throws {
+        let googleVideoURL = try XCTUnwrap(URL(string:
+            "https://rr1---sn.example.googlevideo.com/videoplayback?clen=55354532&mime=audio%2Fmp4"
+        ))
+
+        XCTAssertEqual(
+            PlaybackService.startupWaitTimeoutNanoseconds(
+                for: googleVideoURL,
+                currentlyUsingBoundedLoader: false
+            ),
+            AppConfig.Playback.progressiveFallbackWaitTimeoutNanoseconds
+        )
+        XCTAssertEqual(
+            PlaybackService.startupWaitTimeoutNanoseconds(
+                for: googleVideoURL,
+                currentlyUsingBoundedLoader: true
+            ),
+            AppConfig.Playback.startupWaitTimeoutNanoseconds
+        )
+    }
+
+    func testInteractivePlaybackPromotesLocalOnlyPrefetch() {
+        XCTAssertTrue(
+            PlaybackService.shouldPromotePrefetch(
+                existingUsesRemoteFallback: false,
+                requestedUsesRemoteFallback: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackService.shouldPromotePrefetch(
+                existingUsesRemoteFallback: true,
+                requestedUsesRemoteFallback: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackService.shouldPromotePrefetch(
+                existingUsesRemoteFallback: false,
+                requestedUsesRemoteFallback: false
+            )
+        )
+    }
+
+    func testQueueWarmupContinuesForActiveBackgroundCarPlayPlayback() {
+        XCTAssertTrue(
+            PlaybackService.shouldAllowQueueWarmup(
+                isAppInBackground: true,
+                isCarPlayConnected: true,
+                isPlaybackActive: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackService.shouldAllowQueueWarmup(
+                isAppInBackground: true,
+                isCarPlayConnected: false,
+                isPlaybackActive: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackService.shouldAllowQueueWarmup(
+                isAppInBackground: true,
+                isCarPlayConnected: true,
+                isPlaybackActive: false
+            )
+        )
+        XCTAssertTrue(
+            PlaybackService.shouldAllowQueueWarmup(
+                isAppInBackground: false,
+                isCarPlayConnected: false,
+                isPlaybackActive: false
+            )
+        )
+    }
+
     func testProoflessLongMobileAudioURLRequiresProgressiveFallback() throws {
         let restrictedURL = try XCTUnwrap(URL(string:
             "https://rr1---sn.example.googlevideo.com/videoplayback?clen=55354532&c=IOS&mime=audio%2Fmp4"
@@ -250,6 +323,30 @@ final class MusicTubeCoreTests: XCTestCase {
 
         XCTAssertEqual([unavailable, short, song].playableOnly().map(\.id), [short.id, song.id])
         XCTAssertEqual([short, song].withoutShorts().map(\.id), [song.id])
+    }
+
+    func testLikedSongsFilterNeverFallsBackToNonMusicContent() {
+        let podcast = Track(
+            title: "Weekly Podcast Episode",
+            artist: "Talk Channel",
+            youtubeVideoID: "podcast"
+        )
+        let short = Track(
+            title: "Song #Shorts",
+            artist: "Artist",
+            duration: 30,
+            youtubeVideoID: "short"
+        )
+        let unavailable = Track(title: "[Private video]", artist: "", youtubeVideoID: "private")
+        let song = Track(
+            title: "Full Song",
+            artist: "Artist",
+            duration: 210,
+            youtubeVideoID: "song"
+        )
+
+        XCTAssertTrue([podcast, short, unavailable].likedSongsOnly().isEmpty)
+        XCTAssertEqual([podcast, song, short, unavailable].likedSongsOnly(), [song])
     }
 
     func testTrackSynthesizesArtworkFromYouTubeVideoID() throws {
@@ -495,6 +592,271 @@ final class MusicTubeCoreTests: XCTestCase {
         XCTAssertEqual(result.map(\.playbackKey), [older.playbackKey, newest.playbackKey])
     }
 
+    func testRecommendationDiversityMovesPreviouslyShownSongsBehindFreshSongs() {
+        let shown = Track(title: "Already Shown", artist: "Artist A", youtubeVideoID: "shown")
+        let fresh = Track(title: "Fresh Pick", artist: "Artist B", youtubeVideoID: "fresh")
+
+        let result = RecommendationDiversityPolicy.diversified(
+            [shown, fresh],
+            recentlyPlayed: [],
+            recentlyRecommended: [shown],
+            limit: 2
+        )
+
+        XCTAssertEqual(result.map(\.playbackKey), [fresh.playbackKey, shown.playbackKey])
+    }
+
+    func testRecommendationDiversityCollapsesPresentationVariantsAcrossChannels() {
+        let officialVideo = Track(
+            title: "Adele - Hello (Official Video)",
+            artist: "AdeleVEVO",
+            youtubeVideoID: "official"
+        )
+        let lyricUpload = Track(
+            title: "Hello Lyrics",
+            artist: "Adele - Topic",
+            youtubeVideoID: "lyrics"
+        )
+        let fresh = Track(title: "Easy On Me", artist: "Adele", youtubeVideoID: "fresh")
+
+        let result = RecommendationDiversityPolicy.diversified(
+            [officialVideo, lyricUpload, fresh],
+            recentlyPlayed: [],
+            limit: 3
+        )
+
+        XCTAssertEqual(result.map(\.playbackKey), [officialVideo.playbackKey, fresh.playbackKey])
+    }
+
+    @MainActor
+    func testRecommendationExposureStorePersistsImpressionsAndRotation() {
+        let suiteName = "MusicTubeCoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let track = Track(title: "Shown", artist: "Artist", youtubeVideoID: "shown")
+
+        var store = RecommendationExposureStore(defaults: defaults)
+        store.record([track], profileID: "device")
+        XCTAssertEqual(store.advanceRotation(profileID: "device"), 1)
+
+        store = RecommendationExposureStore(defaults: defaults)
+        XCTAssertEqual(store.recentTracks(profileID: "device").map(\.playbackKey), [track.playbackKey])
+        XCTAssertEqual(store.rotationCursor(profileID: "device"), 1)
+    }
+
+    func testRecommendationEngineStrictlySeparatesMusicSessionFromQuran() async {
+        let engine = RecommendationEngine()
+        let song = Track(title: "Arabic Oud Song", artist: "Oud Artist", youtubeVideoID: "song")
+        let recitation = Track(title: "Surah Maryam Quran Recitation", artist: "Reciter", youtubeVideoID: "quran")
+
+        let musicResults = await engine.recommendations(
+            for: RecommendationRequest(
+                candidates: [recitation, song],
+                recentTracks: [],
+                likedTracks: [],
+                dislikedTrackIDs: [],
+                preferences: .empty,
+                focusedTrack: nil,
+                activeContext: .music,
+                activeQuranDomain: false,
+                limit: 10
+            )
+        )
+        let quranResults = await engine.recommendations(
+            for: RecommendationRequest(
+                candidates: [song, recitation],
+                recentTracks: [],
+                likedTracks: [],
+                dislikedTrackIDs: [],
+                preferences: .empty,
+                focusedTrack: recitation,
+                activeContext: .religious,
+                activeQuranDomain: true,
+                limit: 10
+            )
+        )
+
+        XCTAssertEqual(musicResults.map(\.playbackKey), [song.playbackKey])
+        XCTAssertEqual(quranResults.map(\.playbackKey), [recitation.playbackKey])
+    }
+
+    func testRecommendationEngineUsesLikesAsDiscoveryAffinityWithoutEchoingExactLike() async {
+        let engine = RecommendationEngine()
+        let liked = Track(title: "Loved Song", artist: "Favorite Artist", youtubeVideoID: "liked")
+        let discovery = Track(title: "Unheard Deep Cut", artist: "Favorite Artist", youtubeVideoID: "discovery")
+        let unrelated = Track(title: "Unrelated", artist: "Other Artist", youtubeVideoID: "other")
+
+        let results = await engine.recommendations(
+            for: RecommendationRequest(
+                candidates: [liked, unrelated, discovery],
+                recentTracks: [],
+                likedTracks: [liked],
+                candidateSourcesByTrackID: [
+                    liked.playbackKey: [.likedSongs],
+                    discovery.playbackKey: [.likedSongs],
+                    unrelated.playbackKey: [.exploration]
+                ],
+                dislikedTrackIDs: [],
+                preferences: .empty,
+                focusedTrack: nil,
+                activeContext: .music,
+                activeQuranDomain: false,
+                limit: 3
+            )
+        )
+
+        XCTAssertEqual(results.first?.playbackKey, discovery.playbackKey)
+        XCTAssertTrue(results.contains(liked))
+    }
+
+    func testRecommendationEngineRespondsToSkipsAndCompletedListens() async {
+        let engine = RecommendationEngine()
+        let skippedSeed = Track(title: "Skipped Seed", artist: "Skipped Artist", duration: 200, youtubeVideoID: "skip-seed")
+        let completedSeed = Track(title: "Completed Seed", artist: "Loved Artist", duration: 200, youtubeVideoID: "complete-seed")
+        let skippedCandidate = Track(title: "More Skipped Style", artist: "Skipped Artist", youtubeVideoID: "skip-candidate")
+        let completedCandidate = Track(title: "More Loved Style", artist: "Loved Artist", youtubeVideoID: "complete-candidate")
+        let now = Date()
+        let insights = [
+            TrackBehaviorInsight(
+                track: skippedSeed,
+                playCount: 4,
+                repeatCount: 0,
+                skipCount: 4,
+                completedListenCount: 0,
+                totalListenedDuration: 40,
+                averageListenRatio: 0.05,
+                lastInteractedAt: now
+            ),
+            TrackBehaviorInsight(
+                track: completedSeed,
+                playCount: 4,
+                repeatCount: 3,
+                skipCount: 0,
+                completedListenCount: 4,
+                totalListenedDuration: 760,
+                averageListenRatio: 0.95,
+                lastInteractedAt: now
+            )
+        ]
+
+        let results = await engine.recommendations(
+            for: RecommendationRequest(
+                candidates: [skippedCandidate, completedCandidate],
+                recentTracks: [],
+                likedTracks: [],
+                behaviorInsights: insights,
+                candidateSourcesByTrackID: [
+                    skippedCandidate.playbackKey: [.completedListens],
+                    completedCandidate.playbackKey: [.completedListens]
+                ],
+                dislikedTrackIDs: [],
+                preferences: .empty,
+                focusedTrack: nil,
+                activeContext: .music,
+                activeQuranDomain: false,
+                limit: 2
+            )
+        )
+
+        XCTAssertEqual(results.first?.playbackKey, completedCandidate.playbackKey)
+    }
+
+    func testRecommendationEngineIncludesTasteAdjacentExplorationLane() async {
+        let engine = RecommendationEngine()
+        let familiar = (0..<6).map {
+            Track(title: "Familiar \($0)", artist: "Familiar Artist \($0)", youtubeVideoID: "f-\($0)")
+        }
+        let discovery = (0..<3).map {
+            Track(title: "Discovery \($0)", artist: "Discovery Artist \($0)", youtubeVideoID: "d-\($0)")
+        }
+        let exploration = Track(title: "Adjacent Experiment", artist: "Adjacent Artist", youtubeVideoID: "explore")
+        var sources: [String: Set<RecommendationSeedFamily>] = [:]
+        familiar.forEach { sources[$0.playbackKey] = [.likedSongs] }
+        discovery.forEach { sources[$0.playbackKey] = [.preferences] }
+        sources[exploration.playbackKey] = [.exploration]
+
+        let results = await engine.recommendations(
+            for: RecommendationRequest(
+                candidates: familiar + discovery + [exploration],
+                recentTracks: [],
+                likedTracks: [],
+                candidateSourcesByTrackID: sources,
+                dislikedTrackIDs: [],
+                preferences: .empty,
+                focusedTrack: nil,
+                activeContext: .music,
+                activeQuranDomain: false,
+                limit: 10
+            )
+        )
+
+        XCTAssertTrue(results.contains(exploration))
+        XCTAssertLessThanOrEqual(results.firstIndex(of: exploration) ?? .max, 6)
+    }
+
+    @MainActor
+    func testBalancedRecommendationSeedsAreBoundedAndFamilyDiverse() {
+        let state = AppState.makeDefault()
+        let seeds = RecommendationSeedFamily.allCases.flatMap { family in
+            (0..<3).map { index in
+                RecommendationSeedQuery(
+                    query: "\(family.rawValue) \(index)",
+                    family: family,
+                    lane: family == .exploration ? .exploration : .discovery
+                )
+            }
+        }
+
+        let selected = state.balancedRecommendationSeeds(from: seeds, focused: false)
+
+        XCTAssertLessThanOrEqual(selected.count, 7)
+        XCTAssertEqual(Set(selected.map(\.family)).count, selected.count)
+    }
+
+    @MainActor
+    func testPlaybackRecordingDoesNotReplaceVisibleHomeFeed() {
+        let suiteName = "MusicTubeCoreTests.HomeStability.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(
+            authService: YouTubeAuthService(),
+            catalogService: YouTubeAPIService(),
+            playbackService: PlaybackService(),
+            localMusicProfileStore: LocalMusicProfileStore(defaults: defaults),
+            interactionTracker: InteractionTracker(defaults: defaults),
+            recommendationEngine: RecommendationEngine(),
+            recommendationExposureStore: RecommendationExposureStore(defaults: defaults)
+        )
+        let tracks = [
+            Track(title: "First", artist: "Artist A", youtubeVideoID: "first"),
+            Track(title: "Second", artist: "Artist B", youtubeVideoID: "second"),
+            Track(title: "Third", artist: "Artist C", youtubeVideoID: "third")
+        ]
+        state.updateHomeContent(featuredTracks: tracks)
+        let generation = state.homeContent.recommendationGenerationID
+
+        state.recordLocalPlayback(for: tracks[0])
+
+        XCTAssertEqual(state.featuredTracks.map(\.playbackKey), tracks.map(\.playbackKey))
+        XCTAssertEqual(state.homeContent.recommendationGenerationID, generation)
+    }
+
+    @MainActor
+    func testAutoplayAndCarPlayQueueUseFreshContextCompatibleRecommendations() {
+        let state = AppState.makeDefault()
+        let current = Track(title: "Current Song", artist: "Artist A", youtubeVideoID: "current")
+        let fresh = Track(title: "Fresh Song", artist: "Artist B", youtubeVideoID: "fresh")
+        let recitation = Track(title: "Surah Al-Kahf Quran Recitation", artist: "Reciter", youtubeVideoID: "quran")
+        state.updateHomeContent(featuredTracks: [fresh, recitation], recentTracks: [current])
+
+        let autoplay = state.autoplayContinuationCandidates(after: current)
+        let carPlayQueue = state.recommendationPlaybackQueue()
+
+        XCTAssertTrue(autoplay.allSatisfy { $0.listeningContentContext == .music && $0.isQuranOrRecitation == false })
+        XCTAssertTrue(carPlayQueue.allSatisfy { $0.listeningContentContext == .music && $0.isQuranOrRecitation == false })
+        XCTAssertEqual(carPlayQueue.first?.playbackKey, fresh.playbackKey)
+    }
+
     @MainActor
     func testSearchViewModelCancelsPreviousRequest() async throws {
         let source = MockSearchDataSource(mode: .cancellable)
@@ -621,6 +983,42 @@ final class MusicTubeCoreTests: XCTestCase {
             isThermallyConstrained: false
         )
         XCTAssertEqual(DownloadConcurrencyPolicy.limit(default: 3, environment: constrained), 2)
+    }
+
+    func testRecommendationDiversityLargePoolCompletesWithinInteractiveBudget() {
+        let candidates = (0..<1_200).map { index in
+            Track(
+                title: "Recommendation \(index)",
+                artist: "Artist \(index % 80)",
+                youtubeVideoID: "candidate-\(index)"
+            )
+        }
+        let recentlyPlayed = Array(candidates.prefix(60))
+        let recentlyRecommended = Array(candidates.dropFirst(60).prefix(120))
+        let now = Date()
+        let exposures = candidates.dropFirst(180).prefix(120).enumerated().map { index, track in
+            RecommendationExposure(
+                track: track,
+                shownAt: now.addingTimeInterval(-Double(index) * 900)
+            )
+        }
+
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let result = RecommendationDiversityPolicy.diversified(
+            candidates,
+            recentlyPlayed: recentlyPlayed,
+            recentlyRecommended: recentlyRecommended,
+            recommendationExposures: exposures,
+            limit: 60,
+            recentWindow: 60,
+            recommendationWindow: 120,
+            artistGap: 3,
+            now: now
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+        XCTAssertEqual(result.count, 60)
+        XCTAssertLessThan(elapsed, 1.0, "Diversity ranking exceeded an interactive latency budget")
     }
 
     func testDownloadBatchPlannerDeduplicatesAndPreservesSourceOrder() {

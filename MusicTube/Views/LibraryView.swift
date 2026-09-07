@@ -22,7 +22,12 @@ struct LibraryView: View {
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(action: viewModel.createPlaylist) {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Create playlist")
+
                     NavigationLink {
                         SettingsView(viewModel: coordinator.settings)
                     } label: {

@@ -392,11 +392,13 @@ final class LocalMusicProfileStore: MusicProfileStoring {
         let identifier = trackIdentifier(track)
 
         profile.likedTracks.removeAll { trackIdentifier($0) == identifier }
-        if isLiked {
+        if isLiked, track.isEligibleForLikedSongs {
             profile.likedTracks.insert(track, at: 0)
         }
 
-        profile.likedTracks = Array(deduplicatedTracks(profile.likedTracks).prefix(maxStoredLikedTracks))
+        profile.likedTracks = Array(
+            deduplicatedTracks(profile.likedTracks.likedSongsOnly()).prefix(maxStoredLikedTracks)
+        )
         profiles[profileID] = profile
         persistProfiles()
         return snapshot(from: profile)
@@ -408,7 +410,9 @@ final class LocalMusicProfileStore: MusicProfileStoring {
         
         // Always merge and deduplicate, even if incoming tracks are empty
         // This ensures account tracks are merged with local tracks
-        let mergedTracks = deduplicatedTracks(tracks + profile.likedTracks)
+        let mergedTracks = deduplicatedTracks(
+            tracks.likedSongsOnly() + profile.likedTracks.likedSongsOnly()
+        )
         profile.likedTracks = Array(mergedTracks.prefix(maxStoredLikedTracks))
         profiles[profileID] = profile
         persistProfiles()
@@ -691,7 +695,7 @@ final class LocalMusicProfileStore: MusicProfileStoring {
     }
 
     private func snapshot(from profile: StoredProfile) -> LocalMusicProfileSnapshot {
-        let likedTracks = deduplicatedTracks(profile.likedTracks)
+        let likedTracks = deduplicatedTracks(profile.likedTracks.likedSongsOnly())
         let savedTracks = deduplicatedTracks(profile.savedTracks)
         let recentTracks = deduplicatedTracks(
             profile.playRecords

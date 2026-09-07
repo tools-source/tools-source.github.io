@@ -86,23 +86,25 @@ extension AppState {
         }
 
         let context = recommendationSeedContext(focusedTrack: focusedTrack)
-        guard context.queries.isEmpty == false else {
+        guard context.seedQueries.isEmpty == false else {
             return []
         }
 
         let accessToken = await authorizedAccessTokenIfAvailable()
-        let queryLimit = focusedTrack == nil ? 3 : 3
-        let resultLimit = focusedTrack == nil ? 8 : 12
-
-        // Deterministic seeds always load first. Optional AI work is deliberately kept
-        // out of this initial path so it can never delay the first recommendation shelf.
-        let blendedQueries = orderedUniqueQueries(Array(context.queries.prefix(queryLimit)))
+        let selectedSeeds = balancedRecommendationSeeds(
+            from: context.seedQueries,
+            focused: focusedTrack != nil
+        )
+        let resultLimit = focusedTrack == nil ? 10 : 12
 
         let resultBuckets = await withTaskGroup(of: RecommendationBucket?.self) { group in
-            for query in blendedQueries.prefix(queryLimit + 4) {
+            // Seven searches is a hard fan-out ceiling. Each comes from a different
+            // signal family before any family receives a second slot.
+            for (ordinal, seed) in selectedSeeds.enumerated() {
                 group.addTask {
                     await self.loadRecommendationBucket(
-                        for: query,
+                        for: seed,
+                        ordinal: ordinal,
                         accessToken: accessToken,
                         limit: resultLimit
                     )
@@ -115,45 +117,27 @@ extension AppState {
                     buckets.append(bucket)
                 }
             }
-            return buckets
+            return buckets.sorted { $0.ordinal < $1.ordinal }
         }
 
+        guard Task.isCancelled == false else { return [] }
         guard resultBuckets.isEmpty == false else { return [] }
 
-        var collaborativeHitCounts: [String: Int] = [:]
+        var candidateSources: [String: Set<RecommendationSeedFamily>] = [:]
         for bucket in resultBuckets {
-            let uniqueBucketTrackKeys = Set(bucket.tracks.map(trackIdentifier))
-            for trackKey in uniqueBucketTrackKeys {
-                collaborativeHitCounts[trackKey, default: 0] += 1
+            for track in bucket.tracks {
+                candidateSources[trackIdentifier(track), default: []].insert(bucket.seed.family)
             }
         }
 
-        let rankedTracks = curatedSuggestionTracks(deduplicatedTracks(resultBuckets.flatMap(\.tracks)))
-            .map { track in
-                (
-                    track: track,
-                    score: recommendationScore(
-                        for: track,
-                        context: context,
-                        collaborativeHitCount: collaborativeHitCounts[trackIdentifier(track), default: 0],
-                        totalBucketCount: resultBuckets.count
-                    )
-                )
-            }
-            .sorted {
-                if $0.score.total != $1.score.total {
-                    return $0.score.total > $1.score.total
-                }
-                return $0.track.title.localizedCaseInsensitiveCompare($1.track.title) == .orderedAscending
-            }
-        interactionTracker.registerTracks(rankedTracks.map(\.track))
-
-        let eligibleTracks = rankedTracks.compactMap { rankedTrack -> Track? in
-            let identifier = trackIdentifier(rankedTrack.track)
-            guard context.suppressedTrackKeys.contains(identifier) == false else { return nil }
-            guard rankedTrack.score.total > 0.08 || focusedTrack == nil else { return nil }
-            return rankedTrack.track
+        let eligibleTracks = curatedSuggestionTracks(
+            deduplicatedBySignature(resultBuckets.flatMap(\.tracks))
+        ).filter { track in
+            let identifier = trackIdentifier(track)
+            guard context.suppressedTrackKeys.contains(identifier) == false else { return false }
+            return recommendationContextCompatible(track, context: context)
         }
+        interactionTracker.registerTracks(eligibleTracks)
         let profileSnapshot = localMusicProfileStore.snapshot(for: currentProfileID)
         let collected = await recommendationEngine.recommendations(
             for: RecommendationRequest(
@@ -161,16 +145,25 @@ extension AppState {
                 recentTracks: profileSnapshot.recentTracks,
                 likedTracks: locallyVisibleLikedTracks(from: profileSnapshot),
                 savedTracks: profileSnapshot.savedTracks,
+                recentlyRecommended: recentRecommendationExposures(),
+                recommendationExposures: recentRecommendationExposureRecords(),
+                behaviorInsights: profileSnapshot.behaviorInsights,
+                candidateSourcesByTrackID: candidateSources,
                 dislikedTrackIDs: dislikedTrackIDs,
                 preferences: userPreferenceProfile,
                 focusedTrack: focusedTrack,
+                activeContext: context.activeContentContext,
+                activeQuranDomain: context.activeQuranDomain,
+                sessionArtistAdjustments: context.sessionArtistAdjustments,
+                sessionSkippedTrackIDs: context.suppressedTrackKeys,
                 excludedTrackIDs: excludedIdentifiers,
                 limit: limit
             )
         )
 
-        scheduleAICuration(of: collected, focusedTrack: focusedTrack)
-        return collected
+        let locallyCurated = applyingPendingAICuration(to: collected)
+        scheduleAICuration(of: locallyCurated, focusedTrack: focusedTrack)
+        return locallyCurated
     }
 
     func scheduleAICuration(of tracks: [Track], focusedTrack: Track?) {
@@ -185,21 +178,31 @@ extension AppState {
             guard reranked.map(self.trackIdentifier) != tracks.map(self.trackIdentifier) else { return }
 
             if focusedTrack == nil {
-                let reordered = self.reorderingCurrentRecommendations(
-                    self.featuredTracks,
-                    preferredOrder: reranked
-                )
-                guard reordered != self.featuredTracks else { return }
-                self.updateHomeContent(featuredTracks: reordered)
+                // Stage the result for the next feed generation. A late AI response
+                // must never move the shelf currently under the user's finger.
+                self.pendingAICuratedTrackIDs = reranked.map(self.trackIdentifier)
             } else {
-                let reordered = self.reorderingCurrentRecommendations(
-                    self.relatedTracks,
-                    preferredOrder: reranked
-                )
-                guard reordered != self.relatedTracks else { return }
-                self.relatedTracks = reordered
+                // Related remains deterministic during the active player session too.
+                self.pendingAICuratedTrackIDs = reranked.map(self.trackIdentifier)
             }
         }
+    }
+
+    func applyingPendingAICuration(to tracks: [Track]) -> [Track] {
+        guard pendingAICuratedTrackIDs.isEmpty == false else { return tracks }
+        let ranks = Dictionary(uniqueKeysWithValues: pendingAICuratedTrackIDs.enumerated().map { ($0.element, $0.offset) })
+        let reordered = tracks.enumerated().sorted { lhs, rhs in
+            let left = ranks[trackIdentifier(lhs.element)]
+            let right = ranks[trackIdentifier(rhs.element)]
+            switch (left, right) {
+            case let (.some(a), .some(b)): return a < b
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return lhs.offset < rhs.offset
+            }
+        }.map(\.element)
+        pendingAICuratedTrackIDs = []
+        return reordered
     }
 
     func reorderingCurrentRecommendations(
@@ -403,16 +406,15 @@ extension AppState {
                 return false
             }
             let candidateContext = candidate.listeningContentContext
-            return focusedContext == .unknown
-                || candidateContext == .unknown
-                || candidateContext == focusedContext
+            return focusedContext == .unknown || candidateContext == focusedContext
         }
 
         if contextMatches.isEmpty == false {
             return contextMatches
         }
-        return playable.filter {
-            $0.isQuranOrRecitation == focusedTrack.isQuranOrRecitation
+        return playable.filter { candidate in
+            candidate.isQuranOrRecitation == focusedTrack.isQuranOrRecitation
+                && (focusedContext == .unknown || candidate.listeningContentContext == focusedContext)
         }
     }
 
@@ -491,16 +493,11 @@ extension AppState {
         }
     }
 
-    /// A content signature used to catch the same song re-uploaded under different
-    /// video IDs: normalized title + artist/channel + (when available) duration.
-    /// Two items with the same signature are treated as duplicates.
+    /// A canonical content signature used to catch the same song re-uploaded under
+    /// different video IDs/channels and with presentation labels such as "official
+    /// video" or "lyrics". Two items with the same signature are duplicates.
     func trackSignature(_ track: Track) -> String {
-        let title = SearchTextNormalizer.normalized(track.title)
-        let artist = SearchTextNormalizer.normalized(meaningfulArtistName(from: track.artist) ?? "")
-        // Bucket duration to the nearest 2 seconds so trivial encoding differences
-        // collapse, while genuinely different-length versions stay distinct.
-        let durationBucket = track.duration.map { String(Int(($0 / 2).rounded())) } ?? "?"
-        return "\(title)|\(artist)|\(durationBucket)"
+        RecommendationTrackIdentity.contentSignature(for: track)
     }
 
     /// Removes duplicates by stable video ID first, then by content signature
@@ -530,6 +527,7 @@ extension AppState {
         ids.formUnion(snapshot.topTracks.map(trackIdentifier))
         ids.formUnion(historyTracks.map(trackIdentifier))
         ids.formUnion(downloadService.availableDownloads.map { trackIdentifier($0.track) })
+        ids.formUnion(recentRecommendationExposures().map(trackIdentifier))
         if let nowPlayingTrack {
             ids.insert(trackIdentifier(nowPlayingTrack))
         }

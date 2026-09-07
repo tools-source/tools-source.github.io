@@ -39,6 +39,8 @@ final class AppState: ObservableObject {
         var recentTracks: [Track] = []
         var suggestedMixes: [Playlist] = []
         var statusMessage: String?
+        var recommendationGenerationID = UUID()
+        var recommendationGeneratedAt = Date.distantPast
     }
 
     struct TrackCacheEntry {
@@ -59,7 +61,8 @@ final class AppState: ObservableObject {
     }
 
     struct RecommendationBucket: Sendable {
-        let query: String
+        let seed: RecommendationSeedQuery
+        let ordinal: Int
         let tracks: [Track]
     }
 
@@ -80,6 +83,7 @@ final class AppState: ObservableObject {
 
     struct RecommendationSeedContext {
         let queries: [String]
+        let seedQueries: [RecommendationSeedQuery]
         let preferredArtists: Set<String>
         let focusedArtist: String?
         let focusedTitleTokens: Set<String>
@@ -97,6 +101,7 @@ final class AppState: ObservableObject {
         let preferenceKeywords: Set<String>
         let preferenceContentContexts: Set<ListeningContentContext>
         let activeContentContext: ListeningContentContext?
+        let activeQuranDomain: Bool?
     }
 
     enum PlaylistPickerState: Equatable {
@@ -183,6 +188,7 @@ final class AppState: ObservableObject {
     let localMusicProfileStore: MusicProfileStoring
     let interactionTracker: InteractionTracker
     let recommendationEngine: RecommendationEngine
+    let recommendationExposureStore: RecommendationExposureStore
     /// Optional AI curation layer. Self-guards to a no-op when no backend is configured.
     let openRouterService = OpenRouterService()
     let recommendationCandidateCache = CacheStore<String, [Track]>(
@@ -222,9 +228,18 @@ final class AppState: ObservableObject {
     var homeMixRefreshTask: Task<Void, Never>?
     var homeRecommendationRefreshTask: Task<Void, Never>?
     var homePrefetchTask: Task<Void, Never>?
-    private static let homeFeedCacheMaxAge: TimeInterval = 60 * 60 * 24 * 30
+    private static let homeFeedCacheMaxAge: TimeInterval = 60 * 60 * 24 * 7
+    private static let presentationHomeRefreshCooldown: TimeInterval = 60
     var activeListeningSession: ActiveListeningSession?
     var recentRecommendationOutcomes: [RecommendationSessionOutcome] = []
+    /// Learned in the background and consumed only when the next feed generation is
+    /// intentionally built. This prevents a late network/AI response moving Home.
+    var pendingHomeRecommendations: [Track] = []
+    var pendingAICuratedTrackIDs: [String] = []
+    var accumulatedRecommendationSignalCount = 0
+    /// Frozen at the beginning of a recommendation generation so impressions recorded
+    /// while the user is browsing do not reshuffle cards underneath their finger.
+    var recommendationRotationExposures: [Track] = []
     var collaborativeRecommendationSeedTrackKeys: Set<String> = []
     var locallyUnlikedTrackIDs: Set<String> = []
     var sessionRestoreStarted = false
@@ -235,6 +250,7 @@ final class AppState: ObservableObject {
     var lastPresentationHomeRefreshDate = Date.distantPast
     var presentationHomeRefreshTask: Task<Void, Never>?
     var pendingPresentationHomeRefresh = false
+    var pendingPresentationHomeRefreshShouldForce = false
     var lifecycleObservers: [NSObjectProtocol] = []
 
     init(
@@ -244,6 +260,7 @@ final class AppState: ObservableObject {
         localMusicProfileStore: MusicProfileStoring = LocalMusicProfileStore.shared,
         interactionTracker: InteractionTracker? = nil,
         recommendationEngine: RecommendationEngine = .shared,
+        recommendationExposureStore: RecommendationExposureStore? = nil,
         logger: any AppLogging = DefaultAppLogger(category: "AppState")
     ) {
         self.authService = authService
@@ -252,6 +269,11 @@ final class AppState: ObservableObject {
         self.localMusicProfileStore = localMusicProfileStore
         self.interactionTracker = interactionTracker ?? InteractionTracker.shared
         self.recommendationEngine = recommendationEngine
+        let resolvedExposureStore = recommendationExposureStore ?? RecommendationExposureStore.shared
+        self.recommendationExposureStore = resolvedExposureStore
+        self.recommendationRotationExposures = resolvedExposureStore.recentTracks(
+            profileID: AppConfig.Library.deviceProfileID
+        )
         self.logger = logger
         if let raw = UserDefaults.standard.object(forKey: "musictube.dislikedTrackIDs") as? [String] {
             dislikedTrackIDs = Set(raw)
@@ -335,8 +357,10 @@ final class AppState: ObservableObject {
             state.updatePreferenceOnboardingPresentation()
             state.refreshCarPlay()
             if state.pendingPresentationHomeRefresh {
+                let shouldForce = state.pendingPresentationHomeRefreshShouldForce
                 state.pendingPresentationHomeRefresh = false
-                state.requestPresentationHomeRefresh()
+                state.pendingPresentationHomeRefreshShouldForce = false
+                state.requestPresentationHomeRefresh(forceRefresh: shouldForce)
             }
         }
 
@@ -510,43 +534,49 @@ final class AppState: ObservableObject {
     func handleApplicationDidBecomeActive() {
         isAppInBackground = false
         reconcileSleepTimer()
-        requestPresentationHomeRefresh()
+        requestPresentationHomeRefresh(forceRefresh: false)
     }
 
     /// CarPlay is an active app surface even while the phone is locked. It uses the
     /// same Home state as the phone rather than maintaining a separate recommendation feed.
     func handleCarPlayConnected() {
         isCarPlayConnected = true
-        requestPresentationHomeRefresh()
+        playbackService.setCarPlayConnected(true)
+        requestPresentationHomeRefresh(forceRefresh: false)
     }
 
     func handleCarPlayDidBecomeActive() {
         isCarPlayConnected = true
-        requestPresentationHomeRefresh()
+        playbackService.setCarPlayConnected(true)
+        requestPresentationHomeRefresh(forceRefresh: false)
     }
 
     func handleCarPlayDisconnected() {
         isCarPlayConnected = false
+        playbackService.setCarPlayConnected(false)
     }
 
-    func requestPresentationHomeRefresh() {
+    func requestPresentationHomeRefresh(forceRefresh: Bool = false) {
         // Repaint CarPlay immediately from cached/shared state, then again after refresh.
         refreshCarPlay()
 
         guard authState != .restoring else {
             pendingPresentationHomeRefresh = true
+            pendingPresentationHomeRefreshShouldForce = pendingPresentationHomeRefreshShouldForce || forceRefresh
             return
         }
 
         // App and CarPlay activation callbacks often arrive together. Coalescing that
-        // burst prevents duplicate YouTube requests without suppressing a later open.
-        guard Date().timeIntervalSince(lastPresentationHomeRefreshDate) >= 5 else { return }
+        // burst prevents duplicate YouTube requests. CarPlay opens cached-first and
+        // only checks remote Home when the shared feed is stale.
+        let cooldown = forceRefresh ? 5 : Self.presentationHomeRefreshCooldown
+        guard Date().timeIntervalSince(lastPresentationHomeRefreshDate) >= cooldown else { return }
         lastPresentationHomeRefreshDate = Date()
 
         presentationHomeRefreshTask?.cancel()
         presentationHomeRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.refreshHome(forceRefresh: true)
+            await self.refreshHome(forceRefresh: forceRefresh)
             guard Task.isCancelled == false else { return }
             self.refreshCarPlay()
             self.presentationHomeRefreshTask = nil
@@ -621,10 +651,13 @@ final class AppState: ObservableObject {
         var updated = homeContent
 
         if let featuredTracks {
-            updated.featuredTracks = diversifiedRecommendationTracks(
-                featuredTracks,
-                limit: featuredTracks.count
-            )
+            let previousKeys = updated.featuredTracks.map(trackIdentifier)
+            let nextKeys = featuredTracks.map(trackIdentifier)
+            updated.featuredTracks = featuredTracks
+            if previousKeys != nextKeys {
+                updated.recommendationGenerationID = UUID()
+                updated.recommendationGeneratedAt = Date()
+            }
         }
 
         if let recentTracks {
@@ -828,6 +861,8 @@ final class AppState: ObservableObject {
         await downloadService.deleteAllDownloads()
         localMusicProfileStore.clearAllData()
         interactionTracker.clearAllData()
+        recommendationExposureStore.clearAllData()
+        recommendationRotationExposures = []
         await recommendationCandidateCache.removeAll()
         clearPersistedHomeFeed()
         ImageCache.shared.removeAll()
@@ -880,6 +915,24 @@ final class AppState: ObservableObject {
             guard shouldRefreshRemoteHome || suggestedMixes.isEmpty else { return }
         }
 
+        if forceRefresh {
+            // A user-requested/foreground refresh is an explicit request for a new
+            // batch. Mark the prior visible shelf and rotate the query seeds before
+            // asking any source for more recommendations.
+            recommendationExposureStore.record(
+                Array(featuredTracks.prefix(12)),
+                profileID: currentProfileID
+            )
+            recommendationExposureStore.advanceRotation(profileID: currentProfileID)
+            recommendationRotationExposures = recommendationExposureStore.recentTracks(
+                profileID: currentProfileID
+            )
+        } else {
+            recommendationRotationExposures = recommendationExposureStore.recentTracks(
+                profileID: currentProfileID
+            )
+        }
+
         let didSeedLocalHome = seedHomeFromLocalProfileIfNeeded(forceRefresh: forceRefresh)
         if didSeedLocalHome {
             refreshCarPlay()
@@ -927,7 +980,7 @@ final class AppState: ObservableObject {
                     collaborativeRecommendationSeedTrackKeys = Set((home.featured + home.recent).map(trackIdentifier))
                     let context = recommendationSeedContext(focusedTrack: nowPlayingTrack)
                     let mergedFeatured = rankedRecommendationCandidates(
-                        home.featured + home.recent,
+                        pendingHomeRecommendations + home.featured + home.recent,
                         context: context,
                         limit: 60,
                         excluding: alreadyKnownTrackIdentifiers()
@@ -949,6 +1002,8 @@ final class AppState: ObservableObject {
                         recentTracks: recent,
                         statusMessage: nil
                     )
+                    pendingHomeRecommendations = []
+                    accumulatedRecommendationSignalCount = 0
 
                     refreshCarPlay()
                     scheduleHomeMetadataEnrichment()
@@ -972,17 +1027,11 @@ final class AppState: ObservableObject {
                         guard Task.isCancelled == false, self.allowsOptionalNetworkWork() else { return }
                         guard learnedTracks.isEmpty == false else { return }
 
-                        let latestContext = self.recommendationSeedContext(focusedTrack: self.nowPlayingTrack)
-                        let refreshedFeatured = self.rankedRecommendationCandidates(
-                            learnedTracks + self.featuredTracks,
-                            context: latestContext,
-                            limit: 60,
-                            excluding: self.alreadyKnownTrackIdentifiers()
+                        // Keep learning, but stage this batch for the next intentional
+                        // feed generation instead of mutating the visible Home shelf.
+                        self.pendingHomeRecommendations = self.deduplicatedBySignature(
+                            learnedTracks + self.pendingHomeRecommendations
                         )
-                        guard refreshedFeatured.isEmpty == false else { return }
-                        self.updateHomeContent(featuredTracks: refreshedFeatured)
-                        self.refreshCarPlay()
-                        self.scheduleHomeMetadataEnrichment()
                     }
 
                     homePrefetchTask?.cancel()
@@ -1129,10 +1178,10 @@ final class AppState: ObservableObject {
         guard let feed = try? JSONDecoder().decode(PersistedHomeFeed.self, from: data) else { return }
         guard Date().timeIntervalSince(feed.savedAt) <= Self.homeFeedCacheMaxAge else { return }
 
-        let featured = diversifiedRecommendationTracks(
-            curatedSuggestionTracks(feed.featured),
-            limit: feed.featured.count
-        )
+        // A persisted feed is a UI snapshot: restore its exact order. Re-running the
+        // ranker during launch would make cards jump before the user does anything.
+        let featured = curatedSuggestionTracks(feed.featured)
+            .filter { $0.isQuranOrRecitation == false && $0.listeningContentContext == .music }
         guard featured.isEmpty == false else { return }
         let featuredIDs = Set(featured.map(trackIdentifier))
         let recent = curatedSuggestionTracks(feed.recent)
@@ -1676,8 +1725,11 @@ final class AppState: ObservableObject {
     }
 
     func prefetchPlayback(for tracks: [Track]) {
-        guard allowsPlaybackPrefetch() else { return }
-        playbackService.prefetchStreams(for: tracks)
+        guard allowsPlaybackPrefetch() || isCarPlayConnected else { return }
+        playbackService.prefetchStreams(
+            for: tracks,
+            allowWhileBackgrounded: isCarPlayConnected
+        )
     }
 
     func playNextTrack() {
@@ -1758,32 +1810,34 @@ final class AppState: ObservableObject {
         forceRefresh: Bool = false,
         surfaceErrors: Bool = true
     ) async -> [Track] {
+        func sanitizedTracks(_ tracks: [Track]) -> [Track] {
+            playlist.kind == .likedMusic
+                ? tracks.likedSongsOnly()
+                : tracks.playableOnly()
+        }
+
         if isSyntheticMixID(playlist.id) {
             if forceRefresh == false, let cached = cachedPlaylistTracks(for: playlist.id) {
-                return cached
+                return sanitizedTracks(cached)
             }
 
             await rebuildSuggestedMixes()
-            return cachedPlaylistTracks(for: playlist.id) ?? []
+            return sanitizedTracks(cachedPlaylistTracks(for: playlist.id) ?? [])
         }
 
         if isLocalCollectionID(playlist.id) {
             if forceRefresh == false, let cached = cachedPlaylistTracks(for: playlist.id) {
-                return cached
+                return sanitizedTracks(cached)
             }
 
             _ = mergedLibraryPlaylists(remotePlaylists: playlists.filter { isLocalCollectionID($0.id) == false })
-            return cachedPlaylistTracks(for: playlist.id) ?? []
+            return sanitizedTracks(cachedPlaylistTracks(for: playlist.id) ?? [])
         }
-
-        let localLikedTracks = playlist.kind == .likedMusic
-            ? localMusicProfileStore.snapshot(for: currentProfileID).likedTracks
-            : []
 
         if forceRefresh == false,
            let cached = cachedPlaylistTracks(for: playlist.id),
            cached.isEmpty == false {
-            return cached
+            return sanitizedTracks(cached)
         }
 
         do {
@@ -1797,7 +1851,9 @@ final class AppState: ObservableObject {
                 } ?? []
             } else {
                 if playlist.kind == .likedMusic {
-                    tracks = localLikedTracks
+                    tracks = locallyVisibleLikedTracks(
+                        from: localMusicProfileStore.snapshot(for: currentProfileID)
+                    )
                 } else {
                     tracks = try await catalogService.loadPlaylistItems(
                         for: playlist,
@@ -1806,7 +1862,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            let playableTracks = tracks.playableOnly()
+            let playableTracks = sanitizedTracks(tracks)
             if playableTracks.isEmpty {
                 playlistCache.removeValue(forKey: playlist.id)
             } else {
@@ -1821,9 +1877,12 @@ final class AppState: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             if let cached = cachedPlaylistTracks(for: playlist.id), cached.isEmpty == false {
-                return cached
+                return sanitizedTracks(cached)
             }
-            if playlist.kind == .likedMusic, localLikedTracks.isEmpty == false {
+            let localLikedTracks = playlist.kind == .likedMusic
+                ? locallyVisibleLikedTracks(from: localMusicProfileStore.snapshot(for: currentProfileID))
+                : []
+            if localLikedTracks.isEmpty == false {
                 let fallbackTracks = deduplicatedTracks(localLikedTracks)
                 setPlaylistCache(fallbackTracks, for: playlist.id)
                 return fallbackTracks
@@ -2764,6 +2823,9 @@ final class AppState: ObservableObject {
         accountLikedTrackIDs = []
         activeListeningSession = nil
         recentRecommendationOutcomes = []
+        pendingHomeRecommendations = []
+        pendingAICuratedTrackIDs = []
+        accumulatedRecommendationSignalCount = 0
         collaborativeRecommendationSeedTrackKeys = []
         locallyUnlikedTrackIDs = []
         dislikedTrackIDs = []
@@ -2820,7 +2882,11 @@ final class AppState: ObservableObject {
 
         guard pool.isEmpty == false else { return false }
 
-        let featured = Array(pool.prefix(50))
+        let recommendationContext = recommendationSeedContext(focusedTrack: nowPlayingTrack)
+        let featured = diversifiedRecommendationTracks(
+            pendingHomeRecommendations + pool.filter { recommendationContextCompatible($0, context: recommendationContext) },
+            limit: 50
+        )
         let featuredIDs = Set(featured.map(trackIdentifier))
         let recent = Array(
             curatedSuggestionTracks(snapshot.recentTracks + pool)
@@ -2879,6 +2945,8 @@ final class AppState: ObservableObject {
             suggestedMixes: mixes,
             statusMessage: nil
         )
+        pendingHomeRecommendations = []
+        accumulatedRecommendationSignalCount = 0
         scheduleHomeMetadataEnrichment()
         return true
     }
@@ -2890,7 +2958,8 @@ final class AppState: ObservableObject {
         let savedSongsPlaylist = savedSongsPlaylist
 
         // Capture synchronous fast-path data on the main actor before entering async context.
-        let cachedLiked = likedPlaylist.flatMap { cachedPlaylistTracks(for: $0.id) } ?? []
+        let cachedLiked = (likedPlaylist.flatMap { cachedPlaylistTracks(for: $0.id) } ?? [])
+            .likedSongsOnly()
         let localLiked = locallyVisibleLikedTracks(from: snapshot)
 
         async let likedTracksFetch: [Track] = {
@@ -2961,13 +3030,16 @@ final class AppState: ObservableObject {
         // allow familiar tracks so the shelf is never empty.
         let familiarFallback = topTracks.shuffled() + recentProfileTracks.shuffled()
 
+        let recommendationContext = recommendationSeedContext(focusedTrack: nowPlayingTrack)
         let featuredPool = curatedSuggestionTracks(
-            deduplicatedBySignature(freshLearned + freshBackfill + familiarFallback)
-        )
+            deduplicatedBySignature(
+                pendingHomeRecommendations + freshLearned + freshBackfill + familiarFallback
+            )
+        ).filter { recommendationContextCompatible($0, context: recommendationContext) }
 
         guard featuredPool.isEmpty == false else { return false }
 
-        let featured = Array(featuredPool.prefix(50))
+        let featured = diversifiedRecommendationTracks(featuredPool, limit: 50)
         let featuredIDs = Set(featured.map(trackIdentifier))
         let recent = Array(
             curatedSuggestionTracks(
@@ -2981,6 +3053,8 @@ final class AppState: ObservableObject {
             featuredTracks: featured,
             recentTracks: recent
         )
+        pendingHomeRecommendations = []
+        accumulatedRecommendationSignalCount = 0
         if allowsOptionalNetworkWork() {
             await rebuildSuggestedMixes()
         }
@@ -2994,8 +3068,9 @@ final class AppState: ObservableObject {
         guard blendedPool.isEmpty == false else { return false }
 
         let curatedTracks = curatedSuggestionTracks(blendedPool)
+            .filter { $0.isQuranOrRecitation == false && $0.listeningContentContext == .music }
         updateHomeContent(
-            featuredTracks: Array(curatedTracks.prefix(40)),
+            featuredTracks: diversifiedRecommendationTracks(curatedTracks, limit: 40),
             recentTracks: Array(curatedTracks.dropFirst(16).prefix(24)),
             suggestedMixes: []
         )
@@ -3065,7 +3140,9 @@ final class AppState: ObservableObject {
     }
 
     func locallyVisibleLikedTracks(from snapshot: LocalMusicProfileSnapshot) -> [Track] {
-        snapshot.likedTracks.filter { locallyUnlikedTrackIDs.contains(trackIdentifier($0)) == false }
+        snapshot.likedTracks
+            .likedSongsOnly()
+            .filter { locallyUnlikedTrackIDs.contains(trackIdentifier($0)) == false }
     }
 
     var currentProfileID: String {
@@ -3120,7 +3197,7 @@ final class AppState: ObservableObject {
                 + snapshot.behaviorInsights.map(\.track)
                 + snapshot.customPlaylists.flatMap(\.tracks)
         )
-        likedTrackIDs = Set(snapshot.likedTracks.map(trackIdentifier))
+        likedTrackIDs = Set(locallyVisibleLikedTracks(from: snapshot).map(trackIdentifier))
             .union(accountLikedTrackIDs)
             .subtracting(locallyUnlikedTrackIDs)
         savedTrackIDs = Set(snapshot.savedTracks.map(trackIdentifier))
@@ -3537,7 +3614,12 @@ final class AppState: ObservableObject {
         var candidates: [Track] = []
 
         func append(_ tracks: [Track]) {
-            candidates.append(contentsOf: tracks.filter { trackIdentifier($0) != currentID })
+            candidates.append(contentsOf: tracks.filter { candidate in
+                trackIdentifier(candidate) != currentID
+                    && candidate.isQuranOrRecitation == track.isQuranOrRecitation
+                    && (track.listeningContentContext == .unknown
+                        || candidate.listeningContentContext == track.listeningContentContext)
+            })
         }
 
         if let queueIndex = playbackService.currentQueueIndex,
@@ -3546,13 +3628,21 @@ final class AppState: ObservableObject {
         }
 
         append(relatedTracks)
-        append(searchResults.songs)
         append(homeContent.featuredTracks)
         append(homeContent.recentTracks)
+        append(searchResults.songs)
         append(historyTracks)
 
-        return curatedSuggestionTracks(deduplicatedTracks(candidates))
-            .filter { dislikedTrackIDs.contains(trackIdentifier($0)) == false }
+        return RecommendationDiversityPolicy.diversified(
+            curatedSuggestionTracks(deduplicatedBySignature(candidates))
+                .filter { dislikedTrackIDs.contains(trackIdentifier($0)) == false },
+            recentlyPlayed: recommendationDiversityRecents(),
+            recentlyRecommended: recentRecommendationExposures(),
+            recommendationExposures: recentRecommendationExposureRecords(),
+            limit: 60,
+            recentWindow: 60,
+            artistGap: 3
+        )
     }
 
     func beginListeningSession(for track: Track, using playbackState: PlaybackState) {
@@ -3570,6 +3660,7 @@ final class AppState: ObservableObject {
         if recentRecommendationOutcomes.count > 24 {
             recentRecommendationOutcomes.removeFirst(recentRecommendationOutcomes.count - 24)
         }
+        accumulatedRecommendationSignalCount += skipped ? 2 : 1
         refreshRecommendationsFromSessionSignals()
     }
 
@@ -3583,8 +3674,12 @@ final class AppState: ObservableObject {
             excluding: []
         )
         guard reranked.isEmpty == false, reranked.map(trackIdentifier) != featuredTracks.map(trackIdentifier) else { return }
-        updateHomeContent(featuredTracks: reranked)
-        refreshCarPlay()
+        pendingHomeRecommendations = reranked
+        if accumulatedRecommendationSignalCount >= 4 {
+            // Mark remote candidates stale enough for the next presentation refresh;
+            // do not publish a new snapshot during the current browsing session.
+            lastAuthenticatedHomeRefreshDate = nil
+        }
     }
 
     func refreshRecommendationsFromPreferenceSignals() {
@@ -3665,11 +3760,8 @@ final class AppState: ObservableObject {
     func recordLocalPlayback(for track: Track) {
         _ = localMusicProfileStore.recordPlayback(of: track, for: currentProfileID)
         syncLocalMusicProfileState()
-        // Move the song that just started behind fresh recommendations immediately.
-        // This updates both Made for You and CarPlay without a network refresh.
-        if featuredTracks.isEmpty == false {
-            updateHomeContent(featuredTracks: featuredTracks)
-        }
+        // Record immediately, but keep the visible feed immutable. Recency/fatigue is
+        // applied when the next recommendation generation is intentionally committed.
         refreshLocalLibraryOverlay()
 
         Task { @MainActor [weak self] in
@@ -3826,16 +3918,21 @@ final class AppState: ObservableObject {
             forceRefresh: forceRefresh,
             surfaceErrors: false
         )
-        let accountTracks = tracks.filter { locallyUnlikedTrackIDs.contains(trackIdentifier($0)) == false }
+        let accountTracks = tracks
+            .likedSongsOnly()
+            .filter { locallyUnlikedTrackIDs.contains(trackIdentifier($0)) == false }
         var resolvedTracks = accountTracks
+        var profileSnapshot = localMusicProfileStore.snapshot(for: currentProfileID)
 
         if isLocalCollectionID(likedPlaylist.id) == false {
-            let mergedSnapshot = localMusicProfileStore.mergeLikedTracks(
+            profileSnapshot = localMusicProfileStore.mergeLikedTracks(
                 accountTracks,
                 profileID: currentProfileID
             )
             accountLikedTrackIDs = Set(accountTracks.map(trackIdentifier))
-            resolvedTracks = deduplicatedTracks(accountTracks + mergedSnapshot.likedTracks)
+            resolvedTracks = deduplicatedTracks(
+                accountTracks + profileSnapshot.likedTracks.likedSongsOnly()
+            )
                 .filter { locallyUnlikedTrackIDs.contains(trackIdentifier($0)) == false }
             if resolvedTracks.isEmpty {
                 playlistCache.removeValue(forKey: likedPlaylist.id)
@@ -3846,7 +3943,10 @@ final class AppState: ObservableObject {
             accountLikedTrackIDs = []
         }
 
-        likedTrackIDs = Set(localMusicProfileStore.snapshot(for: currentProfileID).likedTracks.map(trackIdentifier))
+        likedTrackIDs = Set(
+            locallyVisibleLikedTracks(from: profileSnapshot)
+                .map(trackIdentifier)
+        )
             .union(accountLikedTrackIDs)
             .subtracting(locallyUnlikedTrackIDs)
 
@@ -4039,6 +4139,7 @@ final class AppState: ObservableObject {
     }
 
     func applyLocalLikeState(_ isLiked: Bool, for track: Track) {
+        guard isLiked == false || track.isEligibleForLikedSongs else { return }
         let identifier = trackIdentifier(track)
         if isLiked {
             locallyUnlikedTrackIDs.remove(identifier)
@@ -4071,7 +4172,7 @@ final class AppState: ObservableObject {
         if isLiked {
             updatedTracks.insert(track, at: 0)
         }
-        updatedTracks = deduplicatedTracks(updatedTracks)
+        updatedTracks = deduplicatedTracks(updatedTracks.likedSongsOnly())
 
         if updatedTracks.isEmpty {
             playlistCache.removeValue(forKey: playlistID)

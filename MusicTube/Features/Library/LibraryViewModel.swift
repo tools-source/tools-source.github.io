@@ -30,6 +30,10 @@ final class LibraryViewModel: ObservableObject {
         appState.selectedMainTab = .downloads
     }
 
+    func createPlaylist() {
+        appState.presentPlaylistCreator()
+    }
+
     private func rebuildSnapshot() {
         let nextSnapshot = LibrarySnapshot(
             likedSongs: appState.likedSongsPlaylist,

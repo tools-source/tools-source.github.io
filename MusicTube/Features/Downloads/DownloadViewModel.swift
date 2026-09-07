@@ -81,8 +81,23 @@ final class DownloadViewModel: ObservableObject {
         appState.play(track: track, queue: queue)
     }
 
+    func playAll() {
+        playDownloadedQueue(shuffled: false)
+    }
+
+    func shuffleAll() {
+        playDownloadedQueue(shuffled: true)
+    }
+
     func togglePlayback() {
         appState.togglePlayback()
+    }
+
+    private func playDownloadedQueue(shuffled: Bool) {
+        var queue = service.playbackQueue(from: snapshot.downloaded)
+        if shuffled { queue.shuffle() }
+        guard let first = queue.first else { return }
+        appState.play(track: first, queue: queue)
     }
 
     private func rebuildSnapshot() {

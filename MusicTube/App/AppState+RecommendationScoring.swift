@@ -4,9 +4,28 @@ import Foundation
 extension AppState {
     func recommendationSeedContext(focusedTrack: Track?) -> RecommendationSeedContext {
         let snapshot = localMusicProfileStore.snapshot(for: currentProfileID)
-        let savedSeedTracks = curatedSuggestionTracks(snapshot.savedTracks)
-        let likedSeedTracks = curatedSuggestionTracks(locallyVisibleLikedTracks(from: snapshot))
+        let activeTrack = focusedTrack ?? nowPlayingTrack
+        let activeContentContext = activeTrack?.listeningContentContext ?? .music
+        let activeQuranDomain = activeTrack?.isQuranOrRecitation ?? false
+
+        func isCompatibleSeed(_ track: Track) -> Bool {
+            if activeQuranDomain {
+                return track.isQuranOrRecitation
+            }
+            guard track.isQuranOrRecitation == false else { return false }
+            return track.listeningContentContext == activeContentContext
+        }
+
+        // Seed construction runs on the UI actor because it snapshots AppState. Keep
+        // the working set bounded; the engine still receives the complete taste data
+        // for scoring away from the main actor.
+        let visibleLikedTracks = locallyVisibleLikedTracks(from: snapshot)
+        let savedSeedTracks = curatedSuggestionTracks(Array(snapshot.savedTracks.prefix(240)))
+            .filter(isCompatibleSeed)
+        let likedSeedTracks = curatedSuggestionTracks(Array(visibleLikedTracks.prefix(240)))
+            .filter(isCompatibleSeed)
         let behaviorSeedTracks = snapshot.behaviorInsights
+            .filter { isCompatibleSeed($0.track) }
             .sorted {
                 let lhsScore = recommendationAffinityScore(for: $0)
                 let rhsScore = recommendationAffinityScore(for: $1)
@@ -17,6 +36,7 @@ extension AppState {
             }
             .map(\.track)
         let positiveInsights = snapshot.behaviorInsights.filter {
+            isCompatibleSeed($0.track) &&
             recommendationAffinityScore(for: $0) >= 2.0
         }
         let skippedInsights = snapshot.behaviorInsights.filter {
@@ -39,26 +59,70 @@ extension AppState {
                 .map(\.track.artist) +
             savedArtistCollections.map(\.title)
         )
-        var queries: [String] = []
+        var seedQueries: [RecommendationSeedQuery] = []
 
-        if let focusedTrack, focusedTrack.isEligibleForMusicSuggestions {
-            queries.append("\(focusedTrack.artist) \(focusedTrack.title)")
-            queries.append("\(focusedTrack.artist) official audio")
-            queries.append("\(focusedTrack.artist) songs")
-            queries.append("\(focusedTrack.title) official audio")
+        func appendSeed(
+            _ query: String,
+            family: RecommendationSeedFamily,
+            lane: RecommendationLane
+        ) {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return }
+            seedQueries.append(RecommendationSeedQuery(query: trimmed, family: family, lane: lane))
         }
 
-        queries.append(contentsOf: topArtists.prefix(4).map { "\($0) official audio" })
-        queries.append(contentsOf: recentSearches.prefix(4))
-        queries.append(contentsOf: savedSeedTracks.prefix(3).map { "\($0.artist) \($0.title)" })
-        queries.append(contentsOf: likedSeedTracks.prefix(3).map { "\($0.artist) songs" })
-        queries.append(contentsOf: behaviorSeedTracks.prefix(5).map { "\($0.artist) \($0.title)" })
-        queries.append(contentsOf: savedArtistCollections.prefix(3).map { "\($0.title) songs" })
+        if let focusedTrack, focusedTrack.isEligibleForMusicSuggestions {
+            appendSeed("\(focusedTrack.artist) \(focusedTrack.title)", family: .focusedTrack, lane: .familiar)
+            appendSeed("\(focusedTrack.artist) songs", family: .focusedTrack, lane: .discovery)
+            appendSeed("\(focusedTrack.title) related songs", family: .focusedTrack, lane: .discovery)
+        }
+
+        for track in likedSeedTracks.prefix(4) {
+            appendSeed("\(track.artist) songs", family: .likedSongs, lane: .familiar)
+        }
+        for track in savedSeedTracks.prefix(4) {
+            appendSeed("\(track.artist) \(track.title) related songs", family: .savedSongs, lane: .discovery)
+        }
+        for track in behaviorSeedTracks.prefix(5) {
+            appendSeed("\(track.artist) \(track.title)", family: .completedListens, lane: .familiar)
+        }
+        for artist in topArtists.prefix(5) {
+            appendSeed("\(artist) official audio", family: .topArtists, lane: .familiar)
+        }
+        for search in recentSearches.prefix(4) {
+            appendSeed(search, family: .recentSearches, lane: .discovery)
+        }
+        for collection in savedArtistCollections.prefix(3) {
+            appendSeed("\(collection.title) songs", family: .savedSongs, lane: .discovery)
+        }
 
         let preferenceKeywords = snapshot.preferenceProfile.normalizedKeywords
-        queries.append(contentsOf: preferenceKeywords.prefix(6).flatMap { keyword in
-            ["\(keyword) music", keyword]
-        })
+        for keyword in preferenceKeywords.prefix(6) {
+            let preferenceContext = preferenceContentContext(for: keyword)
+            guard preferenceContext == nil || preferenceContext == activeContentContext else { continue }
+            appendSeed("\(keyword) music", family: .preferences, lane: .discovery)
+        }
+        for outcome in recentRecommendationOutcomes.reversed()
+            where outcome.skipped == false && isCompatibleSeed(outcome.track) {
+            appendSeed(
+                "\(outcome.track.artist) similar artists",
+                family: .successfulDiscovery,
+                lane: .discovery
+            )
+        }
+        let explorationAnchors = orderedUniqueQueries(
+            likedSeedTracks.map(\.artist)
+                + savedSeedTracks.map(\.artist)
+                + preferenceKeywords
+        )
+        for anchor in explorationAnchors.prefix(4) {
+            appendSeed("\(anchor) radio songs", family: .exploration, lane: .exploration)
+        }
+
+        var seenSeedQueries: Set<String> = []
+        seedQueries = seedQueries.filter {
+            seenSeedQueries.insert(SearchTextNormalizer.normalized($0.query)).inserted
+        }
 
         let behaviorInsightsByTrackKey = Dictionary(
             uniqueKeysWithValues: snapshot.behaviorInsights.map { (trackIdentifier($0.track), $0) }
@@ -68,7 +132,6 @@ extension AppState {
         }
         let preferenceKeywordTokens = Set(preferenceKeywords.flatMap { SearchTextNormalizer.tokens(from: $0) })
         let preferenceContentContexts = preferenceContentContexts(from: snapshot.preferenceProfile.selectedTags)
-        let activeContentContext = focusedTrack?.listeningContentContext ?? strongestRecentContentContext(from: snapshot.behaviorInsights)
         let keywordSources = recentSearches
             + topArtists
             + savedCollections.map(\.queryHint)
@@ -86,14 +149,15 @@ extension AppState {
         let sessionAdjustment = sessionRecommendationAdjustments(positiveInsights: positiveInsights)
 
         return RecommendationSeedContext(
-            queries: orderedUniqueQueries(queries),
+            queries: seedQueries.map(\.query),
+            seedQueries: seedQueries,
             preferredArtists: Set(topArtists.prefix(10).map(normalizedRecommendationText)),
             focusedArtist: focusedTrack.map { normalizedRecommendationText($0.artist) },
             focusedTitleTokens: Set(SearchTextNormalizer.tokens(from: focusedTrack?.title ?? "")),
             keywordTokens: Set(keywordSources.flatMap { SearchTextNormalizer.tokens(from: $0) }).union(preferenceKeywordTokens),
             behaviorInsightsByTrackKey: behaviorInsightsByTrackKey,
             behaviorInsightsByArtist: behaviorInsightsByArtist,
-            likedTrackKeys: Set(locallyVisibleLikedTracks(from: snapshot).map(trackIdentifier)),
+            likedTrackKeys: Set(visibleLikedTracks.map(trackIdentifier)),
             savedTrackKeys: Set(snapshot.savedTracks.map(trackIdentifier)),
             downloadedTrackKeys: downloadedTrackKeys,
             collaborativeSeedTrackKeys: collaborativeSeedTrackKeys,
@@ -103,7 +167,8 @@ extension AppState {
             sessionArtistAdjustments: sessionAdjustment.artistAdjustments,
             preferenceKeywords: Set(preferenceKeywords.map(normalizedRecommendationText)),
             preferenceContentContexts: preferenceContentContexts,
-            activeContentContext: activeContentContext
+            activeContentContext: activeContentContext,
+            activeQuranDomain: activeQuranDomain
         )
     }
 
@@ -213,15 +278,17 @@ extension AppState {
     }
 
     func loadRecommendationBucket(
-        for query: String,
+        for seed: RecommendationSeedQuery,
+        ordinal: Int,
         accessToken: String?,
         limit: Int
     ) async -> RecommendationBucket? {
+        let query = seed.query
         let normalizedQuery = SearchTextNormalizer.normalized(query)
         guard normalizedQuery.isEmpty == false else { return nil }
 
         if let cachedTracks = await recommendationCandidateCache.value(for: normalizedQuery), cachedTracks.isEmpty == false {
-            return RecommendationBucket(query: query, tracks: cachedTracks)
+            return RecommendationBucket(seed: seed, ordinal: ordinal, tracks: cachedTracks)
         }
 
         guard let response = try? await catalogService.search(query: query, accessToken: accessToken) else {
@@ -231,7 +298,60 @@ extension AppState {
         let tracks = Array(curatedSuggestionTracks(response.songs).prefix(limit))
         guard tracks.isEmpty == false else { return nil }
         await recommendationCandidateCache.set(tracks, for: normalizedQuery)
-        return RecommendationBucket(query: query, tracks: tracks)
+        return RecommendationBucket(seed: seed, ordinal: ordinal, tracks: tracks)
+    }
+
+    func balancedRecommendationSeeds(
+        from seeds: [RecommendationSeedQuery],
+        focused: Bool
+    ) -> [RecommendationSeedQuery] {
+        guard seeds.isEmpty == false else { return [] }
+        let limit = focused ? 4 : 7
+        let cursor = recommendationExposureStore.rotationCursor(profileID: currentProfileID)
+        let baseOrder: [RecommendationSeedFamily] = focused
+            ? [.focusedTrack, .likedSongs, .completedListens, .savedSongs, .successfulDiscovery, .exploration]
+            : [.likedSongs, .completedListens, .savedSongs, .topArtists, .recentSearches, .preferences, .successfulDiscovery, .exploration]
+        let fixedPrefix: [RecommendationSeedFamily] = focused ? [.focusedTrack] : []
+        let rotatable = baseOrder.filter { fixedPrefix.contains($0) == false }
+        let rotation = rotatable.isEmpty ? 0 : cursor % rotatable.count
+        let rotatedFamilies = rotatable.isEmpty
+            ? []
+            : Array(rotatable[rotation...]) + Array(rotatable[..<rotation])
+        let familyOrder = fixedPrefix + rotatedFamilies
+        let grouped = Dictionary(grouping: seeds, by: \.family)
+        var offsets: [RecommendationSeedFamily: Int] = [:]
+        var selected: [RecommendationSeedQuery] = []
+
+        // Round-robin across signal families. Only after every available family has
+        // contributed once can any family take a second retrieval slot.
+        while selected.count < limit {
+            var appended = false
+            for family in familyOrder {
+                let bucket = grouped[family, default: []]
+                guard bucket.isEmpty == false else { continue }
+                let offset = offsets[family, default: 0]
+                guard offset < bucket.count else { continue }
+                let rotatedOffset = (offset + cursor) % bucket.count
+                selected.append(bucket[rotatedOffset])
+                offsets[family] = offset + 1
+                appended = true
+                if selected.count == limit { break }
+            }
+            if appended == false { break }
+        }
+        return selected
+    }
+
+    func recommendationContextCompatible(
+        _ track: Track,
+        context: RecommendationSeedContext
+    ) -> Bool {
+        if let quranDomain = context.activeQuranDomain,
+           track.isQuranOrRecitation != quranDomain {
+            return false
+        }
+        guard let active = context.activeContentContext, active != .unknown else { return true }
+        return track.listeningContentContext == active
     }
 
     func recommendationScore(
@@ -460,17 +580,76 @@ extension AppState {
         RecommendationDiversityPolicy.diversified(
             tracks,
             recentlyPlayed: recommendationDiversityRecents(),
+            recentlyRecommended: recentRecommendationExposures(),
+            recommendationExposures: recentRecommendationExposureRecords(),
             limit: limit
         )
+    }
+
+    func recentRecommendationExposures(limit: Int = 120) -> [Track] {
+        Array(recommendationRotationExposures.prefix(max(0, limit)))
+    }
+
+    func recentRecommendationExposureRecords(limit: Int = 120) -> [RecommendationExposure] {
+        recommendationExposureStore.recentExposures(
+            profileID: currentProfileID,
+            limit: limit
+        )
+    }
+
+    /// Called as a card becomes visible. Recording impressions instead of only plays
+    /// prevents an ignored song from occupying the same prime Home slot indefinitely.
+    func recordRecommendationImpression(_ track: Track) {
+        recordRecommendationImpressions([track])
+    }
+
+    /// CarPlay presents several recommendations at once and does not expose per-row
+    /// visibility callbacks. Recording the prime shelf in one write keeps its novelty
+    /// history aligned with Home without causing a preferences write for every tile.
+    func recordRecommendationImpressions(_ tracks: [Track]) {
+        recommendationExposureStore.record(tracks, profileID: currentProfileID)
+    }
+
+    /// Rotates the deterministic taste-query list while preserving its ranked order.
+    /// The cursor persists, so pull-to-refresh and a later launch do not restart at the
+    /// exact same three artists/searches.
+    func rotatedRecommendationQueries(_ queries: [String]) -> [String] {
+        let unique = orderedUniqueQueries(queries)
+        guard unique.count > 1 else { return unique }
+        let offset = recommendationExposureStore.rotationCursor(profileID: currentProfileID) % unique.count
+        guard offset > 0 else { return unique }
+        return Array(unique[offset...]) + Array(unique[..<offset])
     }
 
     /// Shared by CarPlay's quick-play action and recommendation carousels. Rebuilding
     /// from the current history means every drive starts with the freshest available
     /// song instead of always replaying `featuredTracks.first`.
     func recommendationPlaybackQueue(limit: Int = 60) -> [Track] {
-        diversifiedRecommendationTracks(
-            curatedSuggestionTracks(deduplicatedBySignature(featuredTracks + recentTracks)),
-            limit: limit
+        let activeTrack = nowPlayingTrack
+        let quranDomain = activeTrack?.isQuranOrRecitation ?? false
+        let contentContext = activeTrack?.listeningContentContext ?? .music
+        func isCompatible(_ track: Track) -> Bool {
+            guard track.isQuranOrRecitation == quranDomain else { return false }
+            return contentContext == .unknown || track.listeningContentContext == contentContext
+        }
+
+        // Queue composition is latency-sensitive (CarPlay can request it repeatedly).
+        // It needs only context filtering—not the full profile/seed snapshot.
+        let personalized = featuredTracks.filter(isCompatible)
+        let related = relatedTracks.filter(isCompatible)
+        let familiarFallback = (recentTracks + historyTracks).filter {
+            isCompatible($0)
+        }
+        return RecommendationDiversityPolicy.diversified(
+            curatedSuggestionTracks(
+                deduplicatedBySignature(personalized + related + familiarFallback)
+            ),
+            recentlyPlayed: recommendationDiversityRecents(),
+            recentlyRecommended: recentRecommendationExposures(),
+            recommendationExposures: recentRecommendationExposureRecords(),
+            limit: limit,
+            recentWindow: 60,
+            artistGap: 3
         )
     }
 

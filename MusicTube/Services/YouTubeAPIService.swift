@@ -106,7 +106,6 @@ final class YouTubeAPIService: MusicCatalogProviding {
         maxEntries: 4
     )
     private let likedMusicPlaylistID = AppConfig.YouTube.likedMusicPlaylistID
-    private let likedMusicPreviewLimit = AppConfig.YouTube.likedMusicPreviewLimit
     private let innerTubeClientVersion = AppConfig.YouTube.innerTubeClientVersion
 
     private var innerTubeSearchURL: URL {
@@ -303,32 +302,11 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 loadErrors.append(error)
             }
 
-            let resolvedLikedTracks: [Track]
-            do {
-                resolvedLikedTracks = try await fetchLikedMusicTracks(
-                    accessToken: accessToken,
-                    relatedPlaylists: related,
-                    maxItems: nil
-                )
-            } catch {
-                resolvedLikedTracks = []
-                loadErrors.append(error)
-            }
-
             var resolvedPlaylists = resolvedCollections + resolvedUserPlaylists
 
-            if let fallbackLikedMusicPlaylist = makeLikedMusicPlaylist(
-                from: resolvedLikedTracks,
-                fallbackPlaylist: resolvedPlaylists.first(where: { $0.kind == .likedMusic })
-            ) {
-                if let existingIndex = resolvedPlaylists.firstIndex(where: { $0.kind == .likedMusic }) {
-                    resolvedPlaylists[existingIndex] = fallbackLikedMusicPlaylist
-                } else {
-                    resolvedPlaylists.insert(fallbackLikedMusicPlaylist, at: 0)
-                }
-            } else if resolvedPlaylists.contains(where: { $0.kind == .likedMusic }) == false {
-                // Keep a stable liked-songs slot so library hydration can still attempt account sync
-                // even when likes metadata endpoints return sparse/empty payloads.
+            if resolvedPlaylists.contains(where: { $0.kind == .likedMusic }) == false {
+                // Playlist discovery should stay fast. The song-only liked collection is
+                // hydrated once in the background after the Library becomes interactive.
                 resolvedPlaylists.insert(
                     Playlist(
                         id: related?.likes ?? likedMusicPlaylistID,
@@ -448,10 +426,8 @@ final class YouTubeAPIService: MusicCatalogProviding {
     func loadPlaylistItems(for playlist: Playlist, accessToken: String?) async throws -> [Track] {
         do {
             if playlist.kind == .likedMusic, let accessToken {
-                let relatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
                 return try await fetchLikedMusicTracks(
                     accessToken: accessToken,
-                    relatedPlaylists: relatedPlaylists,
                     maxItems: nil
                 )
             }
@@ -646,7 +622,9 @@ final class YouTubeAPIService: MusicCatalogProviding {
                         title: "Liked Songs",
                         description: "Music-only items from your likes",
                         artworkURL: playlist.artworkURL,
-                        itemCount: playlist.itemCount,
+                        // YouTube's likes playlist count includes non-music videos.
+                        // The exact song count is applied after the filtered fetch.
+                        itemCount: 0,
                         kind: .likedMusic
                     )
                 }
@@ -951,9 +929,11 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 let channel = item.snippet.channelTitle ?? ""
                 guard !isNonMusicContent(title: title, channel: channel) else { continue }
                 guard !looksLikeShorts(title: title) else { continue }
-                if let categoryID = item.snippet.categoryID, categoryID != "10" {
+                guard item.snippet.liveBroadcastContent?.lowercased() != "live",
+                      item.snippet.liveBroadcastContent?.lowercased() != "upcoming" else {
                     continue
                 }
+                guard item.snippet.categoryID == "10" else { continue }
                 musicVideoIDs.insert(item.id)
             }
         }
@@ -1610,72 +1590,49 @@ final class YouTubeAPIService: MusicCatalogProviding {
         return request
     }
 
-    private func fetchLikedMusicPlaylist(accessToken: String) async throws -> Playlist? {
-        let likedTracks = try await fetchLikedMusicTracks(accessToken: accessToken, maxItems: 12)
-        return makeLikedMusicPlaylist(from: likedTracks)
-    }
-
     private func fetchLikedMusicTracks(
         accessToken: String,
         relatedPlaylists: RelatedPlaylists? = nil,
         maxItems: Int?
     ) async throws -> [Track] {
-        let effectiveRelatedPlaylists: RelatedPlaylists?
-        if let relatedPlaylists {
-            effectiveRelatedPlaylists = relatedPlaylists
-        } else {
-            effectiveRelatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
-        }
-
-        var candidates: [[Track]] = []
-        var lastError: Error?
-
-        if let likesPlaylistID = effectiveRelatedPlaylists?.likes {
-            do {
-                let likesPlaylist = Playlist(
-                    id: likesPlaylistID,
-                    title: "Liked Songs",
-                    description: "Music-only items from your likes",
-                    artworkURL: nil,
-                    itemCount: maxItems ?? 0,
-                    kind: .likedMusic
-                )
-
-                let playlistTracks = try await fetchLikedMusicTracksFromLikesPlaylist(
-                    likesPlaylist: likesPlaylist,
-                    accessToken: accessToken,
-                    maxItems: maxItems
-                )
-                if playlistTracks.isEmpty == false {
-                    candidates.append(playlistTracks)
-                }
-            } catch {
-                lastError = error
-            }
-        }
-
+        // `videos.list?myRating=like` already returns category metadata, so it can
+        // validate and collect each page in one request. The likes-playlist route is
+        // retained only as a resilient fallback because it needs a second metadata
+        // request for every page.
         do {
             let ratedTracks = try await fetchLikedMusicTracksByRating(
                 accessToken: accessToken,
                 maxItems: maxItems
             )
-            if ratedTracks.isEmpty == false {
-                candidates.append(ratedTracks)
+            return limitedTracks(
+                deduplicatedTracks(ratedTracks).likedSongsOnly(),
+                maxItems: maxItems
+            )
+        } catch let ratingError {
+            let effectiveRelatedPlaylists: RelatedPlaylists?
+            if let relatedPlaylists {
+                effectiveRelatedPlaylists = relatedPlaylists
+            } else {
+                effectiveRelatedPlaylists = try? await fetchRelatedPlaylists(accessToken: accessToken)
             }
-        } catch {
-            lastError = lastError ?? error
-        }
+            guard let likesPlaylistID = effectiveRelatedPlaylists?.likes else {
+                throw ratingError
+            }
 
-        let mergedTracks = deduplicatedTracks(candidates.flatMap { $0 })
-        if mergedTracks.isEmpty == false {
-            return limitedTracks(mergedTracks, maxItems: maxItems)
+            let likesPlaylist = Playlist(
+                id: likesPlaylistID,
+                title: "Liked Songs",
+                description: "Music-only items from your likes",
+                artworkURL: nil,
+                itemCount: maxItems ?? 0,
+                kind: .likedMusic
+            )
+            return try await fetchLikedMusicTracksFromLikesPlaylist(
+                likesPlaylist: likesPlaylist,
+                accessToken: accessToken,
+                maxItems: maxItems
+            )
         }
-
-        if let lastError {
-            throw lastError
-        }
-
-        return []
     }
 
     private func fetchLikedMusicTracksFromLikesPlaylist(
@@ -1684,6 +1641,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
         maxItems: Int?
     ) async throws -> [Track] {
         var tracks: [Track] = []
+        var seenTrackIDs: Set<String> = []
         var nextPageToken: String?
         let targetCount = maxItems ?? Int.max
 
@@ -1726,11 +1684,16 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 )
             }
 
+            // Fail closed. The likes playlist can contain every kind of YouTube video;
+            // if category validation is unavailable, returning the raw page would leak
+            // podcasts, vlogs, and other videos into Liked Songs.
             let filteredPageTracks = pageTracks.isEmpty
                 ? []
-                : ((try? await filterMusicTracks(pageTracks, accessToken: accessToken)) ?? pageTracks)
+                : try await filterMusicTracks(pageTracks, accessToken: accessToken)
 
-            tracks = deduplicatedTracks(tracks + filteredPageTracks)
+            for track in filteredPageTracks where seenTrackIDs.insert(trackIdentifier(track)).inserted {
+                tracks.append(track)
+            }
             nextPageToken = response.nextPageToken
         } while nextPageToken != nil && tracks.count < targetCount
 
@@ -1739,6 +1702,7 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func fetchLikedMusicTracksByRating(accessToken: String, maxItems: Int?) async throws -> [Track] {
         var tracks: [Track] = []
+        var seenTrackIDs: Set<String> = []
         var nextPageToken: String?
         let targetCount = maxItems ?? Int.max
 
@@ -1763,9 +1727,10 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 endpoint: .videosList
             )
 
-            let requiresMusicFiltering = response.items.contains { $0.snippet.categoryID != "10" }
-            let rawPageTracks = response.items.compactMap { item -> Track? in
-                // Keep liked items unless they are clearly non-music or short-form noise.
+            let pageTracks = response.items.compactMap { item -> Track? in
+                // videos.list supplies the authoritative category here. Missing or
+                // non-Music categories are excluded rather than guessed from titles.
+                guard item.snippet.categoryID == "10" else { return nil }
                 guard !isNonMusicContent(title: item.snippet.title, channel: item.snippet.channelTitle) else {
                     return nil
                 }
@@ -1773,11 +1738,9 @@ final class YouTubeAPIService: MusicCatalogProviding {
                 return track(from: item)
             }
 
-            let pageTracks = requiresMusicFiltering
-                ? ((try? await filterMusicTracks(rawPageTracks, accessToken: accessToken)) ?? rawPageTracks)
-                : rawPageTracks
-
-            tracks = deduplicatedTracks(tracks + pageTracks)
+            for track in pageTracks where seenTrackIDs.insert(trackIdentifier(track)).inserted {
+                tracks.append(track)
+            }
             nextPageToken = response.nextPageToken
         } while nextPageToken != nil && tracks.count < targetCount
 
@@ -2130,22 +2093,6 @@ final class YouTubeAPIService: MusicCatalogProviding {
 
     private func trackIdentifier(_ track: Track) -> String {
         track.youtubeVideoID ?? track.id
-    }
-
-    private func makeLikedMusicPlaylist(
-        from tracks: [Track],
-        fallbackPlaylist: Playlist? = nil
-    ) -> Playlist? {
-        guard tracks.isEmpty == false || fallbackPlaylist != nil else { return nil }
-
-        return Playlist(
-            id: fallbackPlaylist?.id ?? likedMusicPlaylistID,
-            title: "Liked Songs",
-            description: "Music-only items from your likes",
-            artworkURL: tracks.first?.artworkURL ?? fallbackPlaylist?.artworkURL,
-            itemCount: max(tracks.count, fallbackPlaylist?.itemCount ?? 0),
-            kind: .likedMusic
-        )
     }
 
     private func fetchDataAPIResponse<T: Decodable>(

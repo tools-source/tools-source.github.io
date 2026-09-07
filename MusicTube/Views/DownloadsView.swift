@@ -72,19 +72,35 @@ struct DownloadsView: View {
     }
 
     private var summary: some View {
-        HStack(spacing: AppSpacing.medium) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.title2)
-                .foregroundStyle(AppTheme.accent)
+        VStack(spacing: 14) {
+            HStack(spacing: AppSpacing.medium) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(AppTheme.accent)
 
-            VStack(alignment: .leading, spacing: AppSpacing.xSmall) {
-                Text("\(snapshot.downloaded.count) downloaded")
-                    .font(.headline)
-                Text(ByteCountFormatter.string(fromByteCount: snapshot.totalDownloadedBytes, countStyle: .file))
-                    .font(.caption)
-                    .foregroundStyle(AppTheme.secondaryText)
+                VStack(alignment: .leading, spacing: AppSpacing.xSmall) {
+                    Text("\(snapshot.downloaded.count) downloaded")
+                        .font(.headline)
+                    Text(ByteCountFormatter.string(fromByteCount: snapshot.totalDownloadedBytes, countStyle: .file))
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.secondaryText)
+                }
+                Spacer()
             }
-            Spacer()
+
+            if snapshot.downloaded.isEmpty == false {
+                HStack(spacing: 10) {
+                    Button(action: viewModel.playAll) {
+                        Label("Play all", systemImage: "play.fill")
+                    }
+                    .buttonStyle(AppPrimaryActionButtonStyle())
+
+                    Button(action: viewModel.shuffleAll) {
+                        Label("Shuffle", systemImage: "shuffle")
+                    }
+                    .buttonStyle(AppSecondaryActionButtonStyle())
+                }
+            }
         }
         .padding(AppSpacing.medium)
         .appSurface()

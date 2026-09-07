@@ -446,6 +446,12 @@ extension Track {
         !isLikelyShortFormVideo && !isClearlyNonMusicContent
     }
 
+    /// Liked Songs is a music collection, not a mirror of YouTube's general liked-video
+    /// feed. Unlike `musicOnly()`, this rule never falls back to non-music content.
+    var isEligibleForLikedSongs: Bool {
+        isPlayableContent && isEligibleForMusicSuggestions
+    }
+
     var isQuranOrRecitation: Bool {
         let searchText = normalizedMusicClassificationText
         let arabicText = "\(title) \(artist)"
@@ -523,6 +529,12 @@ extension Array where Element == Track {
     func musicOnly() -> [Track] {
         let strict = filter(\.isEligibleForMusicSuggestions)
         return strict.isEmpty ? withoutShorts() : strict
+    }
+
+    /// Strict boundary for Liked Songs. An empty result is preferable to leaking
+    /// podcasts, news, Shorts, or unavailable videos into the music library.
+    func likedSongsOnly() -> [Track] {
+        filter(\.isEligibleForLikedSongs)
     }
 }
 

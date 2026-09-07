@@ -46,6 +46,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private enum BufferingPolicy {
         static let startupForwardBufferDuration = AppConfig.Playback.startupForwardBufferDuration
         static let steadyStateForwardBufferDuration = AppConfig.Playback.steadyStateForwardBufferDuration
+        static let progressiveFallbackWaitTimeoutNanoseconds = AppConfig.Playback.progressiveFallbackWaitTimeoutNanoseconds
         static let startupWaitTimeoutNanoseconds = AppConfig.Playback.startupWaitTimeoutNanoseconds
     }
 
@@ -58,6 +59,12 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         case success(StreamResolutionResult)
         case failure
         case timedOut
+    }
+
+    private struct StreamPrefetch {
+        let id: UUID
+        let usesRemoteFallback: Bool
+        let task: Task<[URL], Never>
     }
 
     /// Picks the duration that should govern playback. A track duration comes from
@@ -188,9 +195,10 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var streamCandidateCache: [String: [URL]] = [:]
     private var authoritativeDurationCache: [String: TimeInterval] = [:]
-    private var prefetchTasks: [String: Task<[URL], Never>] = [:]
+    private var prefetchTasks: [String: StreamPrefetch] = [:]
     private var delayedPrefetchTasks: [String: Task<Void, Never>] = [:]
     private var isAppInBackground = false
+    private var isCarPlayConnected = false
     private var activeTimeObserverInterval: TimeInterval?
     private var lastNowPlayingElapsedUpdate = Date.distantPast
     /// Tracks the timestamp of the last resolution failure per videoID, used to
@@ -289,17 +297,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return
         }
         userInitiatedPause = false
-
-        if track.streamURL == nil {
-            // Reuse any already-running warmup instead of throwing its work away when
-            // the user taps. If none exists, start a latency-sensitive full resolution.
-            _ = enqueueStreamResolutionTaskIfNeeded(
-                for: track,
-                priority: .high,
-                useRemoteFallback: true,
-                allowWhileBackgrounded: true
-            )
-        }
+        prepareInteractivePlayback(for: track)
 
         configureQueue(for: track, queue: queue)
 
@@ -321,16 +319,20 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         if let playbackQueueIndex, playbackQueueIndex + 1 < playbackQueue.count {
             let nextIndex = playbackQueueIndex + 1
+            let nextTrack = playbackQueue[nextIndex]
+            prepareInteractivePlayback(for: nextTrack)
             self.playbackQueueIndex = nextIndex
             updateQueueState()
-            startPlayback(for: playbackQueue[nextIndex])
+            startPlayback(for: nextTrack)
             return
         }
 
         guard repeatMode == .all else { return }
+        let nextTrack = playbackQueue[0]
+        prepareInteractivePlayback(for: nextTrack)
         playbackQueueIndex = 0
         updateQueueState()
-        startPlayback(for: playbackQueue[0])
+        startPlayback(for: nextTrack)
     }
 
     func playPreviousTrack() {
@@ -340,6 +342,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             // If the stream URL expired, restart rather than seeking on a dead item.
             if let url = activeStreamURL, Self.isStreamURLExpired(url), let track = nowPlaying {
                 streamCandidateCache.removeValue(forKey: cacheKey(for: track))
+                prepareInteractivePlayback(for: track)
                 startPlayback(for: track)
                 return
             }
@@ -357,16 +360,20 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         if playbackQueueIndex > 0 {
             let previousIndex = playbackQueueIndex - 1
+            let previousTrack = playbackQueue[previousIndex]
+            prepareInteractivePlayback(for: previousTrack)
             self.playbackQueueIndex = previousIndex
             updateQueueState()
-            startPlayback(for: playbackQueue[previousIndex])
+            startPlayback(for: previousTrack)
             return
         }
 
         if repeatMode == .all, let lastIndex = playbackQueue.indices.last {
+            let previousTrack = playbackQueue[lastIndex]
+            prepareInteractivePlayback(for: previousTrack)
             self.playbackQueueIndex = lastIndex
             updateQueueState()
-            startPlayback(for: playbackQueue[lastIndex])
+            startPlayback(for: previousTrack)
             return
         }
 
@@ -422,8 +429,14 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     /// Eagerly warms the stream cache for a list of tracks (call when tracks first appear on screen).
-    func prefetchStreams(for tracks: [Track]) {
-        guard AppPowerBudget.allowsSpeculativeNetwork(isAppInBackground: isAppInBackground) else { return }
+    func prefetchStreams(for tracks: [Track], allowWhileBackgrounded: Bool = false) {
+        if allowWhileBackgrounded {
+            guard AppPowerBudget.isLowPowerModeEnabled == false,
+                  AppPowerBudget.isThermallyConstrained == false,
+                  AppPowerBudget.isLowBattery == false else { return }
+        } else {
+            guard AppPowerBudget.allowsSpeculativeNetwork(isAppInBackground: isAppInBackground) else { return }
+        }
         guard DataUsageSettings.shared.dataSaverMode == false else { return }
         guard DataUsageSettings.shared.canStream(onCellular: NetworkMonitor.shared.isCellular) else { return }
 
@@ -437,7 +450,11 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         for (index, track) in candidates.enumerated() {
             let immediateWindow = 1
             if index < immediateWindow {
-                _ = enqueueStreamResolutionTaskIfNeeded(for: track, priority: .utility)
+                _ = enqueueStreamResolutionTaskIfNeeded(
+                    for: track,
+                    priority: .utility,
+                    allowWhileBackgrounded: allowWhileBackgrounded
+                )
             } else {
                 let key = cacheKey(for: track)
                 delayedPrefetchTasks[key]?.cancel()
@@ -446,8 +463,14 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                     defer { self?.delayedPrefetchTasks.removeValue(forKey: key) }
                     try? await Task.sleep(nanoseconds: delayNS)
                     guard let self, Task.isCancelled == false else { return }
-                    guard AppPowerBudget.allowsSpeculativeNetwork(isAppInBackground: self.isAppInBackground) else { return }
-                    _ = self.enqueueStreamResolutionTaskIfNeeded(for: track, priority: .background)
+                    if allowWhileBackgrounded == false {
+                        guard AppPowerBudget.allowsSpeculativeNetwork(isAppInBackground: self.isAppInBackground) else { return }
+                    }
+                    _ = self.enqueueStreamResolutionTaskIfNeeded(
+                        for: track,
+                        priority: .background,
+                        allowWhileBackgrounded: allowWhileBackgrounded
+                    )
                 }
                 delayedPrefetchTasks[key] = delayedTask
             }
@@ -461,6 +484,20 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             ? nowPlaying.map(cacheKey(for:))
             : nil
         cancelAllPrefetchTasks(preserving: activeStartupKey)
+    }
+
+    /// CarPlay remains an active playback surface while the phone app is backgrounded.
+    /// Keep exactly the next queue item warm in that state, then return to the normal
+    /// foreground-only speculative policy as soon as CarPlay disconnects.
+    func setCarPlayConnected(_ isConnected: Bool) {
+        guard isCarPlayConnected != isConnected else { return }
+        isCarPlayConnected = isConnected
+
+        if isConnected, let nowPlaying {
+            prewarmQueue(around: nowPlaying)
+        } else if isAppInBackground {
+            cancelSpeculativePrefetches()
+        }
     }
 
     /// Resolves the best audio stream URL for a track (used by DownloadService).
@@ -1156,8 +1193,12 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         beginPlaybackAsSoonAsPossible()
         updatePlaybackState()
 
+        let startupWaitTimeoutNanoseconds = Self.startupWaitTimeoutNanoseconds(
+            for: url,
+            currentlyUsingBoundedLoader: usesBoundedLoader
+        )
         playbackStartupTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: BufferingPolicy.startupWaitTimeoutNanoseconds)
+            try? await Task.sleep(nanoseconds: startupWaitTimeoutNanoseconds)
             guard let self else { return }
             guard let player = self.player else { return }
             guard Task.isCancelled == false else { return }
@@ -1205,6 +1246,33 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         currentlyUsingBoundedLoader == false
             && isHLSManifestURL(url) == false
             && BoundedHTTPStreamLoader(sourceURL: url) != nil
+    }
+
+    nonisolated static func startupWaitTimeoutNanoseconds(
+        for url: URL,
+        currentlyUsingBoundedLoader: Bool
+    ) -> UInt64 {
+        shouldUseBoundedLoaderFallback(
+            for: url,
+            currentlyUsingBoundedLoader: currentlyUsingBoundedLoader
+        )
+            ? AppConfig.Playback.progressiveFallbackWaitTimeoutNanoseconds
+            : AppConfig.Playback.startupWaitTimeoutNanoseconds
+    }
+
+    nonisolated static func shouldPromotePrefetch(
+        existingUsesRemoteFallback: Bool,
+        requestedUsesRemoteFallback: Bool
+    ) -> Bool {
+        requestedUsesRemoteFallback && existingUsesRemoteFallback == false
+    }
+
+    nonisolated static func shouldAllowQueueWarmup(
+        isAppInBackground: Bool,
+        isCarPlayConnected: Bool,
+        isPlaybackActive: Bool
+    ) -> Bool {
+        isAppInBackground == false || (isCarPlayConnected && isPlaybackActive)
     }
 
     static func makePlayerItem(for url: URL) -> AVPlayerItem {
@@ -1360,6 +1428,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             // If the stream URL expired mid-song, do a full restart rather than seeking on a dead item.
             if let url = activeStreamURL, Self.isStreamURLExpired(url), let track = nowPlaying {
                 streamCandidateCache.removeValue(forKey: cacheKey(for: track))
+                prepareInteractivePlayback(for: track)
                 startPlayback(for: track)
                 return
             }
@@ -1372,9 +1441,11 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             if hasNextTrack {
                 playNextTrack()
             } else if playbackQueue.isEmpty == false {
+                let nextTrack = playbackQueue[0]
+                prepareInteractivePlayback(for: nextTrack)
                 playbackQueueIndex = 0
                 updateQueueState()
-                startPlayback(for: playbackQueue[0])
+                startPlayback(for: nextTrack)
             }
         case .off:
             if hasNextTrack {
@@ -2069,7 +2140,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             ? nowPlaying.map(cacheKey(for:))
             : nil
         cancelAllPrefetchTasks(preserving: activeStartupKey)
-        if AppPowerBudget.allowsBackgroundQueueWarmup(), let nowPlaying {
+        if isCarPlayConnected, let nowPlaying {
             prewarmQueue(around: nowPlaying)
         }
         artworkLoadTask?.cancel()
@@ -2077,6 +2148,13 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
     }
 
     private func handlePowerBudgetChanged() {
+        if isAppInBackground, isCarPlayConnected {
+            cancelSpeculativePrefetches()
+            if let nowPlaying {
+                prewarmQueue(around: nowPlaying)
+            }
+            return
+        }
         guard AppPowerBudget.allowsSpeculativeNetwork(isAppInBackground: isAppInBackground) == false else { return }
         cancelSpeculativePrefetches()
     }
@@ -2236,7 +2314,8 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
         if reuseExistingPrefetch == false {
             cancelPrefetch(for: track)
-        } else if let prefetchTask = prefetchTasks[key] ?? enqueueStreamResolutionTaskIfNeeded(for: track, priority: .userInitiated) {
+        } else if let prefetchTask = prefetchTasks[key]?.task
+            ?? enqueueStreamResolutionTaskIfNeeded(for: track, priority: .userInitiated) {
             let prefetchedCandidates = await prefetchTask.value
             let stillValidPrefetch = prefetchedCandidates.filter { !Self.isStreamURLExpired($0) }
             if stillValidPrefetch.isEmpty == false {
@@ -2359,8 +2438,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
 
     private func cancelPrefetch(for track: Track) {
         let key = cacheKey(for: track)
-        prefetchTasks[key]?.cancel()
-        prefetchTasks.removeValue(forKey: key)
+        prefetchTasks.removeValue(forKey: key)?.task.cancel()
     }
 
     private func cancelAllPrefetchTasks(preserving preservedKey: String? = nil) {
@@ -2368,8 +2446,25 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
         delayedPrefetchTasks.removeAll()
         let keysToCancel = prefetchTasks.keys.filter { $0 != preservedKey }
         for key in keysToCancel {
-            prefetchTasks.removeValue(forKey: key)?.cancel()
+            prefetchTasks.removeValue(forKey: key)?.task.cancel()
         }
+    }
+
+    private func prepareInteractivePlayback(for track: Track) {
+        // A direct selection and a CarPlay/Lock Screen queue command are equally
+        // latency-sensitive. Stop unrelated work and promote the selected item so it
+        // never waits behind a local-only speculative extraction.
+        guard allowsNetworkPlayback(for: track) else { return }
+        let selectedKey = cacheKey(for: track)
+        cancelAllPrefetchTasks(preserving: track.streamURL == nil ? selectedKey : nil)
+
+        guard track.streamURL == nil else { return }
+        _ = enqueueStreamResolutionTaskIfNeeded(
+            for: track,
+            priority: .high,
+            useRemoteFallback: true,
+            allowWhileBackgrounded: true
+        )
     }
 
     private func enqueueStreamResolutionTaskIfNeeded(
@@ -2399,8 +2494,17 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return nil
         }
 
-        if let existingTask = prefetchTasks[key] {
-            return existingTask
+        if let existingPrefetch = prefetchTasks[key] {
+            if Self.shouldPromotePrefetch(
+                existingUsesRemoteFallback: existingPrefetch.usesRemoteFallback,
+                requestedUsesRemoteFallback: useRemoteFallback
+            ) {
+                // A tap must not queue behind a lower-priority local-only attempt.
+                existingPrefetch.task.cancel()
+                prefetchTasks.removeValue(forKey: key)
+            } else {
+                return existingPrefetch.task
+            }
         }
 
         guard track.youtubeVideoID != nil || track.streamURL != nil else { return nil }
@@ -2408,9 +2512,15 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return nil
         }
 
+        let prefetchID = UUID()
         let task: Task<[URL], Never> = Task(priority: priority) { [weak self, track] in
             guard let self else { return [] }
-            defer { Task { @MainActor in self.prefetchTasks.removeValue(forKey: key) } }
+            defer {
+                Task { @MainActor [weak self] in
+                    guard self?.prefetchTasks[key]?.id == prefetchID else { return }
+                    self?.prefetchTasks.removeValue(forKey: key)
+                }
+            }
 
             // For play-initiated (high priority) resolution use both local and remote so
             // we never waste a round-trip on a local-only attempt that then retries remotely.
@@ -2423,14 +2533,29 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
             return candidates.filter { !Self.isStreamURLExpired($0) }
         }
 
-        prefetchTasks[key] = task
+        prefetchTasks[key] = StreamPrefetch(
+            id: prefetchID,
+            usesRemoteFallback: useRemoteFallback,
+            task: task
+        )
         return task
     }
 
     private func prewarmQueue(around track: Track) {
         let isConservativeBackgroundWarmup = isAppInBackground
-        guard isConservativeBackgroundWarmup == false || AppPowerBudget.allowsBackgroundQueueWarmup() else { return }
-        guard isAppInBackground == false || isPlaying else { return }
+        let isPlaybackActive = isPlaying || isStartingPlayback
+        guard Self.shouldAllowQueueWarmup(
+            isAppInBackground: isAppInBackground,
+            isCarPlayConnected: isCarPlayConnected,
+            isPlaybackActive: isPlaybackActive
+        ) else { return }
+        if isConservativeBackgroundWarmup {
+            guard AppPowerBudget.isLowPowerModeEnabled == false,
+                  AppPowerBudget.isThermallyConstrained == false,
+                  AppPowerBudget.isLowBattery == false,
+                  DataUsageSettings.shared.dataSaverMode == false,
+                  DataUsageSettings.shared.canStream(onCellular: NetworkMonitor.shared.isCellular) else { return }
+        }
         guard playbackQueue.isEmpty == false else { return }
         guard let currentIndex = playbackQueue.firstIndex(where: { matches($0, track) }) else { return }
 
@@ -2457,7 +2582,7 @@ final class PlaybackService: NSObject, ObservableObject, PlaybackControlling {
                 for: pendingTrack,
                 priority: priority,
                 useRemoteFallback: shouldUseRemoteFallback,
-                allowWhileBackgrounded: isConservativeBackgroundWarmup
+                allowWhileBackgrounded: isConservativeBackgroundWarmup && isCarPlayConnected
             )
         }
     }

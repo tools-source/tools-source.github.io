@@ -254,25 +254,47 @@ private final class CachedArtworkLoader: ObservableObject {
         loadTask?.cancel()
         loadedURL = normalizedURL
         loadedMaxPixelSize = maxPixelSize
-        image = nil
 
         if let cached = ImageCache.shared.image(for: normalizedURL, maxPixelSize: maxPixelSize) {
             image = cached
+            loadTask = nil
             return
         }
 
+        // Keep the previous artwork in place while a replacement is loading. Clearing
+        // it here makes every lazy-grid reconfiguration flash the placeholder, even
+        // when the new image arrives a frame later from the memory cache.
         loadTask = Task { [weak self] in
-            guard let image = await ArtworkRepository.shared.image(for: normalizedURL, maxPixelSize: maxPixelSize) else { return }
-            guard Task.isCancelled == false else { return }
-            self?.image = image
+            let loadedImage = await ArtworkRepository.shared.image(
+                for: normalizedURL,
+                maxPixelSize: maxPixelSize
+            )
+            guard Task.isCancelled == false,
+                  let self,
+                  self.loadedURL == normalizedURL,
+                  self.loadedMaxPixelSize == maxPixelSize else { return }
+            guard let loadedImage else {
+                self.image = nil
+                // Permit a later appearance to retry a transient artwork failure.
+                self.loadedURL = nil
+                self.loadedMaxPixelSize = nil
+                self.loadTask = nil
+                return
+            }
+            self.image = loadedImage
+            self.loadTask = nil
         }
     }
 
     func cancel() {
         loadTask?.cancel()
         loadTask = nil
-        loadedURL = nil
-        loadedMaxPixelSize = nil
+        // Lazy containers call onDisappear while cells are merely off-screen. Retain
+        // successful identity so returning cells do not briefly regress to a placeholder.
+        if image == nil {
+            loadedURL = nil
+            loadedMaxPixelSize = nil
+        }
     }
 }
 

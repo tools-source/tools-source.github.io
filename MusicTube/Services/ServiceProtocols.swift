@@ -118,7 +118,10 @@ struct AppConfig {
         // Interactive extraction is bounded so a failed remote endpoint can never
         // leave the UI waiting indefinitely. Local and remote extraction race.
         static let streamResolutionTimeoutNanoseconds: UInt64 = 3_000_000_000
-        // 5 s gives AVPlayer a fair chance to start before trying the next stream candidate.
+        // Direct progressive YouTube URLs sometimes leave AVPlayer waiting without
+        // buffering a byte. Switch those to the bounded loader quickly; retain the
+        // longer timeout for HLS, local files, and an already-bounded stream.
+        static let progressiveFallbackWaitTimeoutNanoseconds: UInt64 = 1_500_000_000
         static let startupWaitTimeoutNanoseconds: UInt64 = 5_000_000_000
     }
 
